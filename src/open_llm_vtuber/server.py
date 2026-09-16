@@ -80,9 +80,15 @@ class WebSocketServer:
         # It will be populated during the initialize method call
 
         # Add global CORS middleware
+        system_config = self.config.system_config
+        allowed_origins = (
+            system_config.allowed_origins
+            if hasattr(system_config, "allowed_origins")
+            else ["*"]
+        )
         self.app.add_middleware(
             CORSMiddleware,
-            allow_origins=["*"],
+            allow_origins=allowed_origins,
             allow_credentials=True,
             allow_methods=["*"],
             allow_headers=["*"],
@@ -98,14 +104,9 @@ class WebSocketServer:
         )
 
         # Initialize and include proxy routes if proxy is enabled
-        system_config = config.system_config
         if hasattr(system_config, "enable_proxy") and system_config.enable_proxy:
-            # Construct the server URL for the proxy
-            host = system_config.host
-            port = system_config.port
-            server_url = f"ws://{host}:{port}/client-ws"
             self.app.include_router(
-                init_proxy_route(server_url=server_url),
+                init_proxy_route(default_context_cache=self.default_context_cache),
             )
 
         # Mount cache directory first (to ensure audio file access)

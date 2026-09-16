@@ -1,6 +1,31 @@
 const API_BASE_URL = window.location.origin;
 const recorder = new AudioRecorder();
 
+// Authentication
+const apiKeyInput = document.getElementById('apiKeyInput');
+const saveApiKeyBtn = document.getElementById('saveApiKey');
+
+// Load saved API key
+let apiKey = localStorage.getItem('olv_api_key') || '';
+apiKeyInput.value = apiKey;
+
+saveApiKeyBtn.addEventListener('click', () => {
+    apiKey = apiKeyInput.value.trim();
+    localStorage.setItem('olv_api_key', apiKey);
+    alert('API Key saved! Reconnecting WebSocket...');
+    if (ws) {
+        ws.close(); // This will trigger reconnection
+    }
+});
+
+function getAuthHeaders() {
+    const headers = {};
+    if (apiKey) {
+        headers['Authorization'] = `Bearer ${apiKey}`;
+    }
+    return headers;
+}
+
 // Audio context and buffers
 let audioContext = null;
 let audioBuffers = [];
@@ -48,10 +73,14 @@ uploadAudioBtn.addEventListener('click', async () => {
 
         const response = await fetch(`${API_BASE_URL}/asr`, {
             method: 'POST',
-            body: formData
+            body: formData,
+            headers: getAuthHeaders()
         });
 
-        if (!response.ok) throw new Error('ASR request failed');
+        if (!response.ok) {
+            const errorData = await response.json().catch(() => ({}));
+            throw new Error(errorData.error || `ASR request failed with status ${response.status}`);
+        }
 
         const data = await response.json();
         transcriptionArea.value = data.text;
@@ -94,10 +123,14 @@ stopRecordingBtn.addEventListener('click', async () => {
 
         const response = await fetch(`${API_BASE_URL}/asr`, {
             method: 'POST',
-            body: formData
+            body: formData,
+            headers: getAuthHeaders()
         });
 
-        if (!response.ok) throw new Error('ASR request failed');
+        if (!response.ok) {
+            const errorData = await response.json().catch(() => ({}));
+            throw new Error(errorData.error || `ASR request failed with status ${response.status}`);
+        }
 
         const data = await response.json();
         transcriptionArea.value = data.text;
@@ -118,6 +151,15 @@ function connectWebSocket() {
     
     ws.onopen = () => {
         console.log('WebSocket connected');
+        
+        // Send auth message if key is present
+        if (apiKey) {
+            ws.send(JSON.stringify({
+                type: "auth",
+                api_key: apiKey
+            }));
+        }
+
         generateSpeechBtn.disabled = false;
         ttsStatus.textContent = 'Connected to TTS service';
         ttsStatus.className = 'status success';
@@ -226,11 +268,18 @@ function connectWebSocket() {
         }
     };
 
-    ws.onclose = () => {
+    ws.onclose = (event) => {
         console.log('WebSocket disconnected');
         generateSpeechBtn.disabled = true;
-        ttsStatus.textContent = 'Disconnected. Trying to reconnect...';
-        ttsStatus.className = 'status error';
+        
+        if (event.code === 1008) {
+            ttsStatus.textContent = 'Authentication failed. Please check your API Key.';
+            ttsStatus.className = 'status error';
+        } else {
+            ttsStatus.textContent = 'Disconnected. Trying to reconnect...';
+            ttsStatus.className = 'status error';
+            setTimeout(connectWebSocket, 5000);
+        }
         
         // Clean up any pending audio resources
         audioBuffers = [];
@@ -239,8 +288,6 @@ function connectWebSocket() {
             URL.revokeObjectURL(currentAudioPath);
             currentAudioPath = null;
         }
-        
-        setTimeout(connectWebSocket, 5000);
     };
 
     ws.onerror = (error) => {
@@ -385,7 +432,9 @@ connectWebSocket();
 async function fetchWithRetry(url, maxRetries = 3, retryDelay = 1000) {
     for (let i = 0; i < maxRetries; i++) {
         try {
-            const response = await fetch(url);
+            const response = await fetch(url, {
+                headers: getAuthHeaders()
+            });
             if (!response.ok) {
                 throw new Error(`HTTP error! status: ${response.status}`);
             }

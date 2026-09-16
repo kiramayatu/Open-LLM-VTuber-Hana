@@ -1,6 +1,5 @@
 from typing import Type
 from .tts_interface import TTSInterface
-from .gradio_vits_tts import GradioVITSTTS
 
 
 class TTSFactory:
@@ -66,15 +65,7 @@ class TTSFactory:
                 language=kwargs.get("language"),
                 device=kwargs.get("device"),
                 speed=kwargs.get("speed"),
-            )       
-        elif engine_type == "gradio_vits":
-
-            return GradioVITSTTS(
-            api_url=kwargs.get("api_url", "http://127.0.0.1:7860/"),
-                speaker=kwargs.get("speaker", "Hana"),
-                language=kwargs.get("language", "日本語"),
-                speed=kwargs.get("speed", 1.0),
-        )
+            )
         elif engine_type == "x_tts":
             from .x_tts import TTSEngine as XTTSEngine
 

@@ -478,18 +478,27 @@ class WebSocketHandler:
     async def _handle_audio_data(
         self, websocket: WebSocket, client_uid: str, data: WSMessage
     ) -> None:
-        """Handle incoming audio data"""
+        """Handle incoming audio data with buffer size limits to prevent OOM"""
         audio_data = data.get("audio", [])
         if audio_data:
-            self.received_data_buffers[client_uid] = np.append(
-                self.received_data_buffers[client_uid],
-                np.array(audio_data, dtype=np.float32),
-            )
+            # Check buffer size before appending
+            # 10MB limit for float32 audio data (approx 2.5M samples)
+            MAX_SAMPLES = 2_500_000
+            current_buffer = self.received_data_buffers.get(client_uid, np.array([]))
+            
+            if len(current_buffer) + len(audio_data) > MAX_SAMPLES:
+                logger.warning(f"Audio buffer for client {client_uid} exceeded limit. Clearing buffer.")
+                self.received_data_buffers[client_uid] = np.array(audio_data, dtype=np.float32)
+            else:
+                self.received_data_buffers[client_uid] = np.append(
+                    current_buffer,
+                    np.array(audio_data, dtype=np.float32),
+                )
 
     async def _handle_raw_audio_data(
         self, websocket: WebSocket, client_uid: str, data: WSMessage
     ) -> None:
-        """Handle incoming raw audio data for VAD processing"""
+        """Handle incoming raw audio data for VAD processing with buffer limits"""
         context = self.client_contexts[client_uid]
         chunk = data.get("audio", [])
         if chunk:
@@ -502,10 +511,19 @@ class WebSocketHandler:
                     pass
                 elif len(audio_bytes) > 1024:
                     # Detected audio activity (voice)
-                    self.received_data_buffers[client_uid] = np.append(
-                        self.received_data_buffers[client_uid],
-                        np.frombuffer(audio_bytes, dtype=np.int16).astype(np.float32),
-                    )
+                    # 10MB limit for float32 audio data
+                    MAX_SAMPLES = 2_500_000
+                    current_buffer = self.received_data_buffers.get(client_uid, np.array([]))
+                    new_audio = np.frombuffer(audio_bytes, dtype=np.int16).astype(np.float32)
+                    
+                    if len(current_buffer) + len(new_audio) > MAX_SAMPLES:
+                        logger.warning(f"Raw audio buffer for client {client_uid} exceeded limit. Clearing buffer.")
+                        self.received_data_buffers[client_uid] = new_audio
+                    else:
+                        self.received_data_buffers[client_uid] = np.append(
+                            current_buffer,
+                            new_audio,
+                        )
                     await websocket.send_text(
                         json.dumps({"type": "control", "text": "mic-audio-end"})
                     )

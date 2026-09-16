@@ -3,6 +3,10 @@ system_config:
   conf_version: 'v1.2.1'
   host: 'localhost' # use 0.0.0.0 if you want other devices to access this page
   port: 12393
+  # API key for server authentication. If empty, authentication is disabled (not recommended).
+  api_key: ''
+  # List of allowed origins for CORS. Use ['*'] to allow all (not recommended for production).
+  allowed_origins: ["*"]
   # New setting for alternative configurations
   config_alts_dir: 'characters'
   # Tool prompts that will be appended to the persona prompt
@@ -27,12 +31,12 @@ system_config:
 
 # configuration for the default character
 character_config:
-  conf_name: 'mao_pro' # The name of character configuration file.
-  conf_uid: 'mao_pro_001' # The unique identifier of character configuration.
-  live2d_model_name: 'mao_pro' # The name of Live2D model. Must be the same as the corresponding name in model_dict.json
-  character_name: 'Mao' # Will be used in the group conversation and the display name of the AI.
-  avatar: 'mao.png' # Suggest using a square image for the avatar. Save it in the avatars folder. Leave blank to use the first letter of the character name as the avatar.
-  human_name: 'Human' # Will be used in the group conversation and the display name of the human.
+  conf_name: 'type79' # The name of character configuration file.
+  conf_uid: 'type79_01' # The unique identifier of character configuration.
+  live2d_model_name: 'type79' # The name of Live2D model. Must be the same as the corresponding name in model_dict.json
+  character_name: 'hana' # Will be used in the group conversation and the display name of the AI.
+  avatar: 'type97.png' # Suggest using a square image for the avatar. Save it in the avatars folder. Leave blank to use the first letter of the character name as the avatar.
+  human_name: 'hana' # Will be used in the group conversation and the display name of the human.
 
   # ============== Prompts ==============
 
@@ -109,7 +113,7 @@ character_config:
         llm_api_key: 'somethingelse'
         organization_id: null
         project_id: null
-        model: 'qwen2.5:latest'
+        model: 'LESSTHANSUPER/MAGNUM_V4-Mistral_Small:12b_Q6_K'
         temperature: 1.0 # value between 0 to 2
         interrupt_method: 'user'
         # This is the method to use for prompting the interruption signal. 
