@@ -1,15 +1,37 @@
 import os
 import json
+import asyncio
 from uuid import uuid4
 import numpy as np
 from datetime import datetime
-from fastapi import APIRouter, WebSocket, UploadFile, File, Response
+from fastapi import APIRouter, WebSocket, UploadFile, File, Response, Depends, HTTPException, status
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from starlette.responses import JSONResponse
 from starlette.websockets import WebSocketDisconnect
 from loguru import logger
 from .service_context import ServiceContext
 from .websocket_handler import WebSocketHandler
 from .proxy_handler import ProxyHandler
+
+security = HTTPBearer(auto_error=False)
+
+
+async def get_current_api_key(
+    default_context_cache: ServiceContext,
+    auth: HTTPAuthorizationCredentials = Depends(security),
+):
+    """Dependency to validate the API key from the Authorization header"""
+    expected_api_key = default_context_cache.system_config.api_key
+    if not expected_api_key:
+        return None  # Authentication is disabled
+
+    if not auth or auth.credentials != expected_api_key:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or Missing API Key",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    return auth.credentials
 
 
 def init_client_ws_route(default_context_cache: ServiceContext) -> APIRouter:
@@ -30,6 +52,30 @@ def init_client_ws_route(default_context_cache: ServiceContext) -> APIRouter:
     async def websocket_endpoint(websocket: WebSocket):
         """WebSocket endpoint for client connections"""
         await websocket.accept()
+
+        # Handle authentication
+        expected_api_key = default_context_cache.system_config.api_key
+        if expected_api_key:
+            try:
+                # Wait for the first message to be the auth message
+                auth_msg = await asyncio.wait_for(websocket.receive_json(), timeout=5.0)
+                if (
+                    auth_msg.get("type") != "auth"
+                    or auth_msg.get("api_key") != expected_api_key
+                ):
+                    logger.warning("WebSocket authentication failed")
+                    await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+                    return
+                logger.info("WebSocket authenticated successfully")
+            except asyncio.TimeoutError:
+                logger.warning("WebSocket authentication timed out")
+                await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+                return
+            except Exception as e:
+                logger.error(f"Error during WebSocket authentication: {e}")
+                await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+                return
+
         client_uid = str(uuid4())
 
         try:
@@ -45,18 +91,20 @@ def init_client_ws_route(default_context_cache: ServiceContext) -> APIRouter:
     return router
 
 
-def init_proxy_route(server_url: str) -> APIRouter:
+def init_proxy_route(default_context_cache: ServiceContext) -> APIRouter:
     """
     Create and return API routes for handling proxy connections.
 
     Args:
-        server_url: The WebSocket URL of the actual server
+        default_context_cache: Default service context cache for new sessions.
 
     Returns:
         APIRouter: Configured router with proxy WebSocket endpoint
     """
     router = APIRouter()
-    proxy_handler = ProxyHandler(server_url)
+    server_config = default_context_cache.system_config
+    server_url = f"ws://{server_config.host}:{server_config.port}/client-ws"
+    proxy_handler = ProxyHandler(server_url, api_key=server_config.api_key)
 
     @router.websocket("/proxy-ws")
     async def proxy_endpoint(websocket: WebSocket):
@@ -83,6 +131,10 @@ def init_webtool_routes(default_context_cache: ServiceContext) -> APIRouter:
 
     router = APIRouter()
 
+    # Pass default_context_cache to dependencies
+    async def verify_api_key(auth: HTTPAuthorizationCredentials = Depends(security)):
+        return await get_current_api_key(default_context_cache, auth)
+
     @router.get("/web-tool")
     async def web_tool_redirect():
         """Redirect /web-tool to /web_tool/index.html"""
@@ -93,7 +145,7 @@ def init_webtool_routes(default_context_cache: ServiceContext) -> APIRouter:
         """Redirect /web_tool to /web_tool/index.html"""
         return Response(status_code=302, headers={"Location": "/web-tool/index.html"})
 
-    @router.get("/live2d-models/info")
+    @router.get("/live2d-models/info", dependencies=[Depends(verify_api_key)])
     async def get_live2d_folder_info():
         """Get information about available Live2D models"""
         live2d_dir = "live2d-models"
@@ -138,15 +190,26 @@ def init_webtool_routes(default_context_cache: ServiceContext) -> APIRouter:
             }
         )
 
-    @router.post("/asr")
+    @router.post("/asr", dependencies=[Depends(verify_api_key)])
     async def transcribe_audio(file: UploadFile = File(...)):
         """
         Endpoint for transcribing audio using the ASR engine
         """
         logger.info(f"Received audio file for transcription: {file.filename}")
 
+        # Limit file size to 10MB to prevent OOM
+        MAX_FILE_SIZE = 10 * 1024 * 1024  # 10MB
+        
         try:
             contents = await file.read()
+            
+            if len(contents) > MAX_FILE_SIZE:
+                logger.error(f"File too large: {len(contents)} bytes")
+                return Response(
+                    content=json.dumps({"error": "File too large. Maximum size is 10MB."}),
+                    status_code=413,
+                    media_type="application/json",
+                )
 
             # Validate minimum file size
             if len(contents) < 44:  # Minimum WAV header size
@@ -202,6 +265,30 @@ def init_webtool_routes(default_context_cache: ServiceContext) -> APIRouter:
     async def tts_endpoint(websocket: WebSocket):
         """WebSocket endpoint for TTS generation"""
         await websocket.accept()
+
+        # Handle authentication
+        expected_api_key = default_context_cache.system_config.api_key
+        if expected_api_key:
+            try:
+                # Wait for the first message to be the auth message
+                auth_msg = await asyncio.wait_for(websocket.receive_json(), timeout=5.0)
+                if (
+                    auth_msg.get("type") != "auth"
+                    or auth_msg.get("api_key") != expected_api_key
+                ):
+                    logger.warning("TTS WebSocket authentication failed")
+                    await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+                    return
+                logger.info("TTS WebSocket authenticated successfully")
+            except asyncio.TimeoutError:
+                logger.warning("TTS WebSocket authentication timed out")
+                await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+                return
+            except Exception as e:
+                logger.error(f"Error during TTS WebSocket authentication: {e}")
+                await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+                return
+
         logger.info("TTS WebSocket connection established")
 
         try:

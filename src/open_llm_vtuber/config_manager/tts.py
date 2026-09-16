@@ -358,6 +358,21 @@ class CoquiTTSConfig(I18nMixin):
         ),
     }
 
+class GradioVITSTTSConfig(I18nMixin):
+    """Configuration for Custom Gradio VITS TTS."""
+    api_url: str = Field("http://127.0.0.1:7860/", alias="api_url")
+    speaker: str = Field("Hana", alias="speaker")
+    language: str = Field("日本語", alias="language")
+    speed: float = Field(1.0, alias="speed")
+
+    DESCRIPTIONS: ClassVar[Dict[str, Description]] = {
+        "api_url": Description(en="Gradio API URL", zh="Gradio API 地址"),
+        "speaker": Description(en="Speaker name", zh="说话人名称"),
+        "language": Description(en="Language", zh="语言"),
+        "speed": Description(en="Speech speed", zh="语速"),
+    }
+
+
 
 class SherpaOnnxTTSConfig(I18nMixin):
     """Configuration for Sherpa Onnx TTS."""
@@ -702,8 +717,10 @@ class TTSConfig(I18nMixin):
         "elevenlabs_tts",
         "cartesia_tts",
         "piper_tts",
+        "gradio_vits",
     ] = Field(..., alias="tts_model")
 
+    gradio_vits: Optional[GradioVITSTTSConfig] = Field(None, alias="gradio_vits")
     azure_tts: Optional[AzureTTSConfig] = Field(None, alias="azure_tts")
     bark_tts: Optional[BarkTTSConfig] = Field(None, alias="bark_tts")
     edge_tts: Optional[EdgeTTSConfig] = Field(None, alias="edge_tts")
@@ -810,7 +827,8 @@ class TTSConfig(I18nMixin):
             values.elevenlabs_tts.model_validate(values.elevenlabs_tts.model_dump())
         elif tts_model == "cartesia_tts" and values.cartesia_tts is not None:
             values.cartesia_tts.model_validate(values.cartesia_tts.model_dump())
-
         elif tts_model == "piper_tts" and values.piper_tts is not None:
             values.piper_tts.model_validate(values.piper_tts.model_dump())
+        elif tts_model == "gradio_vits" and values.gradio_vits is not None:
+            values.gradio_vits.model_validate(values.gradio_vits.model_dump())
         return values

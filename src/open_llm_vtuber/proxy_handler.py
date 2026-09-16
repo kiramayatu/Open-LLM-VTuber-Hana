@@ -16,14 +16,20 @@ class ProxyHandler:
     This enables scenarios like having a web client and a live platform both connected to the same VTuber server.
     """
 
-    def __init__(self, server_url: str = "ws://localhost:12393/client-ws"):
+    def __init__(
+        self,
+        server_url: str = "ws://localhost:12393/client-ws",
+        api_key: Optional[str] = None,
+    ):
         """
         Initialize the proxy handler.
 
         Args:
             server_url: The WebSocket URL of the actual server
+            api_key: The API key for authentication
         """
         self.server_url = server_url
+        self.api_key = api_key
         self.server_ws: Optional[aiohttp.ClientWebSocketResponse] = None
         self.clients: Dict[str, WebSocket] = {}
         self.connected = False
@@ -50,6 +56,14 @@ class ProxyHandler:
                 if not self._session:
                     self._session = aiohttp.ClientSession()
                 self.server_ws = await self._session.ws_connect(self.server_url)
+
+                # Authenticate with the server if api_key is provided
+                if self.api_key:
+                    await self.server_ws.send_json(
+                        {"type": "auth", "api_key": self.api_key}
+                    )
+                    logger.info("Proxy authenticated with backend server")
+
                 self.connected = True
                 logger.info(f"Proxy connected to server at {self.server_url}")
 
@@ -97,6 +111,27 @@ class ProxyHandler:
             websocket: The client's WebSocket connection
         """
         await websocket.accept()
+
+        # Handle client authentication
+        if self.api_key:
+            try:
+                auth_msg = await asyncio.wait_for(websocket.receive_json(), timeout=5.0)
+                if (
+                    auth_msg.get("type") != "auth"
+                    or auth_msg.get("api_key") != self.api_key
+                ):
+                    logger.warning("Proxy client authentication failed")
+                    await websocket.close(code=1008)
+                    return
+                logger.info("Proxy client authenticated successfully")
+            except asyncio.TimeoutError:
+                logger.warning("Proxy client authentication timed out")
+                await websocket.close(code=1008)
+                return
+            except Exception as e:
+                logger.error(f"Error during proxy client authentication: {e}")
+                await websocket.close(code=1008)
+                return
 
         # Generate a unique client ID
         client_id = str(uuid.uuid4())

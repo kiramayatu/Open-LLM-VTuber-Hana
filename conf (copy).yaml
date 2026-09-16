@@ -3,10 +3,6 @@ system_config:
   conf_version: 'v1.2.1'
   host: 'localhost' # use 0.0.0.0 if you want other devices to access this page
   port: 12393
-  # API key for server authentication. If empty, authentication is disabled (not recommended).
-  api_key: ''
-  # List of allowed origins for CORS. Use ['*'] to allow all (not recommended for production).
-  allowed_origins: ["*"]
   # New setting for alternative configurations
   config_alts_dir: 'characters'
   # Tool prompts that will be appended to the persona prompt
@@ -31,12 +27,12 @@ system_config:
 
 # configuration for the default character
 character_config:
-  conf_name: 'type79' # The name of character configuration file.
-  conf_uid: 'type79_01' # The unique identifier of character configuration.
-  live2d_model_name: 'type79' # The name of Live2D model. Must be the same as the corresponding name in model_dict.json
-  character_name: 'hana' # Will be used in the group conversation and the display name of the AI.
-  avatar: 'type97.png' # Suggest using a square image for the avatar. Save it in the avatars folder. Leave blank to use the first letter of the character name as the avatar.
-  human_name: 'hana' # Will be used in the group conversation and the display name of the human.
+  conf_name: 'mao_pro' # The name of character configuration file.
+  conf_uid: 'mao_pro_001' # The unique identifier of character configuration.
+  live2d_model_name: 'mao_pro' # The name of Live2D model. Must be the same as the corresponding name in model_dict.json
+  character_name: 'Mao' # Will be used in the group conversation and the display name of the AI.
+  avatar: 'mao.png' # Suggest using a square image for the avatar. Save it in the avatars folder. Leave blank to use the first letter of the character name as the avatar.
+  human_name: 'Human' # Will be used in the group conversation and the display name of the human.
 
   # ============== Prompts ==============
 
@@ -113,7 +109,7 @@ character_config:
         llm_api_key: 'somethingelse'
         organization_id: null
         project_id: null
-        model: 'LESSTHANSUPER/MAGNUM_V4-Mistral_Small:12b_Q6_K'
+        model: 'qwen2.5:latest'
         temperature: 1.0 # value between 0 to 2
         interrupt_method: 'user'
         # This is the method to use for prompting the interruption signal. 
@@ -273,7 +269,7 @@ character_config:
 
   # =================== Text to Speech ===================
   tts_config:
-    tts_model: 'edge_tts'
+    tts_model: 'gradio_vits'
     # text to speech model options:
     #   'azure_tts', 'pyttsx3_tts', 'edge_tts', 'bark_tts',
     #   'cosyvoice_tts', 'melo_tts', 'coqui_tts', 'piper_tts',
@@ -339,6 +335,13 @@ character_config:
       device: 'auto' # You can set it manually to 'cpu' or 'cuda' or 'cuda:0' or 'mps'
       speed: 1.0
 
+
+    gradio_vits:
+      api_url: "http://127.0.0.1:7860/"
+      speaker: "Hana"      # Options: 'Hana', 'specialweek', 'zhongli'
+      language: "日本語"    # Options: '日本語', '简体中文', 'English', 'Mix'
+      speed: 1.0
+
     x_tts:
       api_url: 'http://127.0.0.1:8020/tts_to_audio'
       speaker_wav: 'female'
@@ -347,10 +350,10 @@ character_config:
     gpt_sovits_tts:
       # put ref audio to root path of GPT-Sovits, or set the path here
       api_url: 'http://127.0.0.1:9880/tts'
-      text_lang: 'zh'
-      ref_audio_path: ''
-      prompt_lang: 'zh'
-      prompt_text: ''
+      text_lang: 'ja'
+      ref_audio_path: '/mnt/Data/hanaset/test.wav'
+      prompt_lang: 'ja'
+      prompt_text: 'おはよう ございます'
       text_split_method: 'cut5'
       batch_size: '1'
       media_type: 'wav'
@@ -478,8 +481,8 @@ character_config:
 
     translator_config:
       # Like... you speak and read the subtitles in English, and the TTS speaks Japanese or that kind of things
-      translate_audio: False # Warning: you need to deploy DeeplX to use this. Otherwise it's going to crash
-      translate_provider: 'deeplx' # deeplx or tencent
+      translate_audio: true # Warning: you need to deploy DeeplX to use this. Otherwise it's going to crash
+      translate_provider: 'libretranslate' # deeplx or tencent
 
       deeplx:
         deeplx_target_lang: 'JA'
@@ -494,6 +497,13 @@ character_config:
         region: 'ap-guangzhou'
         source_lang: 'zh'
         target_lang: 'ja'
+
+      libretranslate:
+        ibretranslate_api_endpoint: 'http://127.0.0.1:5000'
+        libretranslate_target_lang: 'ja'  # Target language code
+        libretranslate_api_key: ''        # Leave empty if self-hosted without key
+        translate_audio: True             # Set to True to enable the feature
+
 
 # Live Streaming Integration
 live_config:

@@ -65,20 +65,26 @@ class HumeAIAgent(AgentInterface):
             self._ws = None
             self._connected = False
 
-        # Build URL with query parameters
-        socket_url = f"wss://{self.host}/v0/evi/chat?api_key={self.api_key}"
+        # API key should be in headers, not query parameters for better security
+        headers = {"X-Hume-Api-Key": self.api_key}
+        # Build URL without API key
+        socket_url = f"wss://{self.host}/v0/evi/chat"
 
+        params = []
         if self.config_id:
-            socket_url += f"&config_id={self.config_id}"
+            params.append(f"config_id={self.config_id}")
 
         if resume_chat_group_id:
             logger.info(f"Resuming chat group: {resume_chat_group_id}")
-            socket_url += f"&resumed_chat_group_id={resume_chat_group_id}"
+            params.append(f"resumed_chat_group_id={resume_chat_group_id}")
             self._chat_group_id = resume_chat_group_id
+
+        if params:
+            socket_url += "?" + "&".join(params)
 
         logger.info(f"Connecting to EVI with config_id: {self.config_id}")
 
-        self._ws = await websockets.connect(socket_url)
+        self._ws = await websockets.connect(socket_url, extra_headers=headers)
         self._connected = True
 
         async for message in self._ws:

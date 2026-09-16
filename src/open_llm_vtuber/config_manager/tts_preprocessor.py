@@ -50,6 +50,28 @@ class TencentConfig(I18nMixin):
     }
 
 
+class LibreTranslateConfig(I18nMixin):
+    """Configuration for LibreTranslate translation service."""
+
+    libretranslate_api_endpoint: str = Field(default="http://localhost:5000", alias="libretranslate_api_endpoint")
+    libretranslate_target_lang: str = Field(..., alias="libretranslate_target_lang")
+    libretranslate_api_key: Optional[str] = Field(default="", alias="libretranslate_api_key")
+
+    DESCRIPTIONS: ClassVar[Dict[str, Description]] = {
+        "libretranslate_api_endpoint": Description(
+            en="API endpoint URL for LibreTranslate service", 
+            zh="LibreTranslate 服务的 API 端点 URL"
+        ),
+        "libretranslate_target_lang": Description(
+            en="Target language code for translation (e.g., 'en', 'ja')",
+            zh="翻译的目标语言代码（例如 'en', 'ja'）",
+        ),
+        "libretranslate_api_key": Description(
+            en="API key for LibreTranslate (optional if self-hosted)",
+            zh="LibreTranslate 的 API 密钥（自托管时可选）",
+        ),
+    }
+
 # --- Main TranslatorConfig model ---
 
 
@@ -57,11 +79,12 @@ class TranslatorConfig(I18nMixin):
     """Configuration for translation services."""
 
     translate_audio: bool = Field(..., alias="translate_audio")
-    translate_provider: Literal["deeplx", "tencent"] = Field(
+    translate_provider: Literal["deeplx", "tencent", "libretranslate"] = Field(
         ..., alias="translate_provider"
     )
     deeplx: Optional[DeepLXConfig] = Field(None, alias="deeplx")
     tencent: Optional[TencentConfig] = Field(None, alias="tencent")
+    libretranslate: Optional[LibreTranslateConfig] = Field(None, alias="libretranslate") # Add this
 
     DESCRIPTIONS: ClassVar[Dict[str, Description]] = {
         "translate_audio": Description(
@@ -93,6 +116,8 @@ class TranslatorConfig(I18nMixin):
                 raise ValueError(
                     "Tencent configuration must be provided when translate_audio is True and translate_provider is 'tencent'"
                 )
+            elif translate_provider == "libretranslate" and values.libretranslate is None:
+                raise ValueError("LibreTranslate configuration must be provided when translate_provider is 'libretranslate'")
 
         return values
 

@@ -10,6 +10,8 @@ class SystemConfig(I18nMixin):
     conf_version: str = Field(..., alias="conf_version")
     host: str = Field(..., alias="host")
     port: int = Field(..., alias="port")
+    api_key: str = Field("", alias="api_key")
+    allowed_origins: list[str] = Field(["*"], alias="allowed_origins")
     config_alts_dir: str = Field(..., alias="config_alts_dir")
     tool_prompts: Dict[str, str] = Field(..., alias="tool_prompts")
     enable_proxy: bool = Field(False, alias="enable_proxy")
@@ -18,6 +20,14 @@ class SystemConfig(I18nMixin):
         "conf_version": Description(en="Configuration version", zh="配置文件版本"),
         "host": Description(en="Server host address", zh="服务器主机地址"),
         "port": Description(en="Server port number", zh="服务器端口号"),
+        "api_key": Description(
+            en="API key for server authentication. If empty, authentication is disabled (not recommended).",
+            zh="服务器认证密钥。如果为空，则禁用认证（不推荐）。",
+        ),
+        "allowed_origins": Description(
+            en="List of allowed origins for CORS. Use ['*'] to allow all (not recommended for production).",
+            zh="允许的 CORS 来源列表。使用 ['*'] 允许所有（不推荐在生产环境中使用）。",
+        ),
         "config_alts_dir": Description(
             en="Directory for alternative configurations", zh="备用配置目录"
         ),

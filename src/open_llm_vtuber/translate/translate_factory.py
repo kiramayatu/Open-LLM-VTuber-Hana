@@ -1,5 +1,6 @@
 from .deeplx import DeepLXTranslate
 from .tencent import TencentTranslate
+from .libretranslate import LibreTranslate
 from .translate_interface import TranslateInterface
 
 
@@ -22,5 +23,11 @@ class TranslateFactory:
                 source_lang=translate_provider_config.get("source_lang"),
                 target_lang=translate_provider_config.get("target_lang"),
             )
+        elif translate_provider == "libretranslate":
+            return LibreTranslate(
+                api_endpoint=translate_provider_config.get("libretranslate_api_endpoint"),
+                target_lang=translate_provider_config.get("libretranslate_target_lang"),
+                api_key=translate_provider_config.get("libretranslate_api_key"),
+        )
         else:
             raise ValueError(f"Unsupported translate provider: {translate_provider}")
