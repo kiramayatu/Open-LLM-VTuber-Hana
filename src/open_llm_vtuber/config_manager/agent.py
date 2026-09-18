@@ -33,6 +33,7 @@ class BasicMemoryAgentConfig(I18nMixin, BaseModel):
     segment_method: Literal["regex", "pysbd"] = Field("pysbd", alias="segment_method")
     use_mcpp: Optional[bool] = Field(False, alias="use_mcpp")
     mcp_enabled_servers: Optional[List[str]] = Field([], alias="mcp_enabled_servers")
+    mcp_allowed_tools: Optional[List[str]] = Field([], alias="mcp_allowed_tools")
 
     DESCRIPTIONS: ClassVar[Dict[str, Description]] = {
         "llm_provider": Description(
@@ -54,6 +55,10 @@ class BasicMemoryAgentConfig(I18nMixin, BaseModel):
         "mcp_enabled_servers": Description(
             en="List of MCP servers to enable for the agent",
             zh="为智能体启用 MCP 服务器列表",
+        ),
+        "mcp_allowed_tools": Description(
+            en="Explicit allowlist of MCP tool names permitted to execute. Empty means no MCP tools may execute.",
+            zh="明确允许执行的 MCP 工具名称列表。为空表示不允许执行任何 MCP 工具。",
         ),
     }
 

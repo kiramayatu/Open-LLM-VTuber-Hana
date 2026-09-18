@@ -3,8 +3,9 @@ system_config:
   conf_version: 'v1.2.1'
   host: 'localhost' # use 0.0.0.0 if you want other devices to access this page
   port: 12393
-  # API key for server authentication. If empty, authentication is disabled (not recommended).
-  api_key: ''
+  # Required: API key for client/API authentication.
+  # Replace this with a strong random value before starting the server.
+  api_key: 'CHANGE-ME-TO-A-RANDOM-SECRET'
   # List of allowed origins for CORS. Use ['*'] to allow all (not recommended for production).
   allowed_origins: ["*"]
   # New setting for alternative configurations
@@ -72,6 +73,10 @@ character_config:
         # 'Plus' means that it has the ability to call tools by using OpenAI API.
         use_mcpp: True
         mcp_enabled_servers: ["time", "ddg-search"] # Enabled MCP servers
+        # Security: only tools explicitly listed here can be executed by the LLM.
+        # Empty list = MCP tools remain visible to the app but execution is blocked.
+        # Add exact MCP tool names you trust after reviewing each server.
+        mcp_allowed_tools: []
 
       letta_agent:
         host: 'localhost' # Host address

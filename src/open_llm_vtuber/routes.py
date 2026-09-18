@@ -15,6 +15,15 @@ from .proxy_handler import ProxyHandler
 
 security = HTTPBearer(auto_error=False)
 
+# TTS WebSocket limits to prevent unauthenticated/abusive clients from
+# exhausting CPU/GPU resources with huge text or request bursts.
+MAX_TTS_TEXT_LENGTH = 16 * 1024
+MAX_TTS_SENTENCES = 64
+MAX_TTS_REQUESTS_PER_MINUTE = 20
+MAX_TTS_WS_MESSAGE_BYTES = 128 * 1024
+MAX_TTS_CONNECTIONS = 8
+MAX_CLIENT_CONNECTIONS = 32
+
 
 async def get_current_api_key(
     default_context_cache: ServiceContext,
@@ -23,7 +32,10 @@ async def get_current_api_key(
     """Dependency to validate the API key from the Authorization header"""
     expected_api_key = default_context_cache.system_config.api_key
     if not expected_api_key:
-        return None  # Authentication is disabled
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Server API key is not configured",
+        )
 
     if not auth or auth.credentials != expected_api_key:
         raise HTTPException(
@@ -51,30 +63,43 @@ def init_client_ws_route(default_context_cache: ServiceContext) -> APIRouter:
     @router.websocket("/client-ws")
     async def websocket_endpoint(websocket: WebSocket):
         """WebSocket endpoint for client connections"""
+        if len(ws_handler.client_connections) >= MAX_CLIENT_CONNECTIONS:
+            await websocket.close(code=status.WS_1013_TRY_AGAIN_LATER)
+            return
+
         await websocket.accept()
 
-        # Handle authentication
+        # Handle authentication (fail closed; an empty API key never disables auth)
         expected_api_key = default_context_cache.system_config.api_key
-        if expected_api_key:
-            try:
-                # Wait for the first message to be the auth message
+        if not expected_api_key:
+            logger.error("WebSocket connection rejected: server API key is not configured")
+            await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+            return
+
+        try:
+            # Prefer the API key supplied in the WebSocket URL. This makes the
+            # authentication flow robust against frontend message-ordering issues.
+            query_api_key = websocket.query_params.get("api_key")
+            if query_api_key:
+                supplied_api_key = query_api_key
+            else:
+                # Backward-compatible fallback: require the first frame to be auth.
                 auth_msg = await asyncio.wait_for(websocket.receive_json(), timeout=5.0)
-                if (
-                    auth_msg.get("type") != "auth"
-                    or auth_msg.get("api_key") != expected_api_key
-                ):
-                    logger.warning("WebSocket authentication failed")
-                    await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
-                    return
-                logger.info("WebSocket authenticated successfully")
-            except asyncio.TimeoutError:
-                logger.warning("WebSocket authentication timed out")
+                supplied_api_key = auth_msg.get("api_key") if auth_msg.get("type") == "auth" else None
+
+            if supplied_api_key != expected_api_key:
+                logger.warning("WebSocket authentication failed")
                 await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
                 return
-            except Exception as e:
-                logger.error(f"Error during WebSocket authentication: {e}")
-                await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
-                return
+            logger.info("WebSocket authenticated successfully")
+        except asyncio.TimeoutError:
+            logger.warning("WebSocket authentication timed out")
+            await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+            return
+        except Exception as e:
+            logger.error(f"Error during WebSocket authentication: {e}")
+            await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+            return
 
         client_uid = str(uuid4())
 
@@ -266,42 +291,89 @@ def init_webtool_routes(default_context_cache: ServiceContext) -> APIRouter:
         """WebSocket endpoint for TTS generation"""
         await websocket.accept()
 
-        # Handle authentication
+        # Handle authentication (fail closed; an empty API key never disables auth)
         expected_api_key = default_context_cache.system_config.api_key
-        if expected_api_key:
-            try:
-                # Wait for the first message to be the auth message
-                auth_msg = await asyncio.wait_for(websocket.receive_json(), timeout=5.0)
-                if (
-                    auth_msg.get("type") != "auth"
-                    or auth_msg.get("api_key") != expected_api_key
-                ):
-                    logger.warning("TTS WebSocket authentication failed")
-                    await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
-                    return
-                logger.info("TTS WebSocket authenticated successfully")
-            except asyncio.TimeoutError:
-                logger.warning("TTS WebSocket authentication timed out")
-                await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
-                return
-            except Exception as e:
-                logger.error(f"Error during TTS WebSocket authentication: {e}")
-                await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
-                return
+        if not expected_api_key:
+            logger.error("TTS WebSocket connection rejected: server API key is not configured")
+            await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+            return
 
+        try:
+            # Prefer the API key supplied in the WebSocket URL.
+            query_api_key = websocket.query_params.get("api_key")
+            if query_api_key:
+                supplied_api_key = query_api_key
+            else:
+                auth_msg = await asyncio.wait_for(websocket.receive_json(), timeout=5.0)
+                supplied_api_key = auth_msg.get("api_key") if auth_msg.get("type") == "auth" else None
+
+            if supplied_api_key != expected_api_key:
+                logger.warning("TTS WebSocket authentication failed")
+                await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+                return
+            logger.info("TTS WebSocket authenticated successfully")
+        except asyncio.TimeoutError:
+            logger.warning("TTS WebSocket authentication timed out")
+            await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+            return
+        except Exception as e:
+            logger.error(f"Error during TTS WebSocket authentication: {e}")
+            await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+            return
+
+        if tts_connections >= MAX_TTS_CONNECTIONS:
+            await websocket.close(code=1013)
+            return
+
+        tts_connections += 1
         logger.info("TTS WebSocket connection established")
+        request_times = []
 
         try:
             while True:
-                data = await websocket.receive_json()
-                text = data.get("text")
-                if not text:
+                raw_message = await websocket.receive()
+                if raw_message.get("type") == "websocket.disconnect":
+                    raise WebSocketDisconnect(code=raw_message.get("code", 1000))
+
+                raw_text = raw_message.get("text")
+                if raw_text is None:
+                    await websocket.close(code=1003)
+                    raise WebSocketDisconnect(code=1003)
+
+                if len(raw_text.encode("utf-8")) > MAX_TTS_WS_MESSAGE_BYTES:
+                    await websocket.send_json({"status": "error", "message": "TTS request too large"})
+                    await websocket.close(code=1009)
+                    raise WebSocketDisconnect(code=1009)
+
+                try:
+                    data = json.loads(raw_text)
+                except json.JSONDecodeError:
+                    await websocket.send_json({"status": "error", "message": "Invalid JSON"})
                     continue
 
-                logger.info(f"Received text for TTS: {text}")
+                text = data.get("text")
+                if not isinstance(text, str) or not text.strip():
+                    continue
+
+                if len(text) > MAX_TTS_TEXT_LENGTH:
+                    await websocket.send_json({"status": "error", "message": "TTS text too large"})
+                    continue
+
+                now = datetime.now().timestamp()
+                request_times = [t for t in request_times if now - t < 60]
+                if len(request_times) >= MAX_TTS_REQUESTS_PER_MINUTE:
+                    await websocket.send_json({"status": "error", "message": "TTS rate limit exceeded"})
+                    await websocket.close(code=1013)
+                    raise WebSocketDisconnect(code=1013)
+                request_times.append(now)
+
+                logger.info(f"Received text for TTS ({len(text)} chars)")
 
                 # Split text into sentences
                 sentences = [s.strip() for s in text.split(".") if s.strip()]
+                if len(sentences) > MAX_TTS_SENTENCES:
+                    await websocket.send_json({"status": "error", "message": "Too many TTS sentences"})
+                    continue
 
                 try:
                     # Generate and send audio for each sentence
@@ -337,5 +409,7 @@ def init_webtool_routes(default_context_cache: ServiceContext) -> APIRouter:
         except Exception as e:
             logger.error(f"Error in TTS WebSocket connection: {e}")
             await websocket.close()
+        finally:
+            tts_connections = max(0, tts_connections - 1)
 
     return router

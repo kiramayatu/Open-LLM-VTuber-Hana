@@ -20,9 +20,15 @@ class ToolExecutor:
         self,
         mcp_client: MCPClient,
         tool_manager: ToolManager,
+        allowed_tools: list[str] | None = None,
     ):
         self._mcp_client = mcp_client
         self._tool_manager = tool_manager
+        # Security boundary: only explicitly allowlisted tools may execute.
+        self._allowed_tools = set(allowed_tools or [])
+        logger.info(
+            f"ToolExecutor allowlist contains {len(self._allowed_tools)} tool(s)."
+        )
 
     def parse_tool_call(self, call: Union[Dict[str, Any], ToolCallObject]) -> tuple:
         """Parse tool call from different formats.
@@ -214,7 +220,7 @@ class ToolExecutor:
                 + "Z",
             }
 
-            # Execute the tool
+            # Execute the tool only when explicitly allowlisted.
             (
                 is_error,
                 text_content,
@@ -319,7 +325,17 @@ class ToolExecutor:
         if tool_input is None:
             tool_input = {}
 
-        if not tool_info:
+        if tool_name not in self._allowed_tools:
+            logger.warning(
+                f"Blocked MCP tool '{tool_name}' (ID: {tool_id}) because it is not in the explicit allowlist."
+            )
+            text_content = (
+                f"Tool '{tool_name}' is not permitted to execute. "
+                "Ask the user to add it to mcp_allowed_tools if this tool is trusted."
+            )
+            content_items = [{"type": "error", "text": text_content}]
+            is_error = True
+        elif not tool_info:
             logger.error(f"Tool '{tool_name}' not found in ToolManager.")
             text_content = f"Error: Tool '{tool_name}' is not available."
             content_items = [{"type": "error", "text": text_content}]

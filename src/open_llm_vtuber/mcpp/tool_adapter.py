@@ -217,7 +217,7 @@ class ToolAdapter:
         return openai_tools, claude_tools
 
     async def get_tools(
-        self, enabled_servers: List[str]
+        self, enabled_servers: List[str], allowed_tools: List[str] | None = None
     ) -> Tuple[str, List[Dict[str, Any]], List[Dict[str, Any]]]:
         """Run the dynamic fetching and formatting process."""
         logger.info(
@@ -226,7 +226,29 @@ class ToolAdapter:
         servers_info, formatted_tools_dict = await self.get_server_and_tool_info(
             enabled_servers
         )
-        mcp_prompt_string = self.construct_mcp_prompt_string(servers_info)
-        openai_tools, claude_tools = self.format_tools_for_api(formatted_tools_dict)
+        allowed = set(allowed_tools or [])
+        if allowed_tools is None:
+            # Fail closed when no explicit tool allowlist is supplied.
+            logger.warning("MC: No MCP tool allowlist supplied; all tools are disabled.")
+            allowed = set()
+
+        # Filter both prompt metadata and API schemas so the LLM only sees tools
+        # that are explicitly trusted. Execution is independently enforced by
+        # ToolExecutor as a defense-in-depth check.
+        filtered_servers_info = {}
+        for server_name, tools in servers_info.items():
+            filtered = {name: info for name, info in tools.items() if name in allowed}
+            if filtered:
+                filtered_servers_info[server_name] = filtered
+
+        filtered_tools_dict = {
+            name: tool for name, tool in formatted_tools_dict.items() if name in allowed
+        }
+
+        logger.info(
+            f"MC: Allowlisted {len(filtered_tools_dict)} of {len(formatted_tools_dict)} discovered tool(s)."
+        )
+        mcp_prompt_string = self.construct_mcp_prompt_string(filtered_servers_info)
+        openai_tools, claude_tools = self.format_tools_for_api(filtered_tools_dict)
         logger.info("MC: Dynamic tool construction complete.")
         return mcp_prompt_string, openai_tools, claude_tools

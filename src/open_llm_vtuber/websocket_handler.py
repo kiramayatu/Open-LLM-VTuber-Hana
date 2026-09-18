@@ -6,6 +6,13 @@ from enum import Enum
 import numpy as np
 from loguru import logger
 
+# WebSocket resource limits. These are deliberately conservative to prevent
+# oversized JSON/audio payloads from consuming excessive CPU/RAM per connection.
+MAX_WS_MESSAGE_BYTES = 2 * 1024 * 1024  # 2 MiB total JSON message
+MAX_TEXT_INPUT_LENGTH = 16 * 1024  # 16 KiB user text
+MAX_IMAGES = 8
+MAX_IMAGE_DATA_BYTES = 512 * 1024  # 512 KiB per image payload
+
 from .service_context import ServiceContext
 from .chat_group import (
     ChatGroupManager,
@@ -214,7 +221,59 @@ class WebSocketHandler:
         try:
             while True:
                 try:
-                    data = await websocket.receive_json()
+                    raw_message = await websocket.receive()
+                    if raw_message.get("type") == "websocket.disconnect":
+                        raise WebSocketDisconnect(
+                            code=raw_message.get("code", 1000)
+                        )
+
+                    raw_text = raw_message.get("text")
+                    if raw_text is None:
+                        # This application protocol expects JSON text frames.
+                        logger.warning(f"Ignoring non-text WebSocket message from {client_uid}")
+                        await websocket.close(code=1003)
+                        raise WebSocketDisconnect(code=1003)
+
+                    if len(raw_text.encode("utf-8")) > MAX_WS_MESSAGE_BYTES:
+                        logger.warning(
+                            f"WebSocket message from {client_uid} exceeded {MAX_WS_MESSAGE_BYTES} bytes"
+                        )
+                        await websocket.send_text(
+                            json.dumps({"type": "error", "message": "WebSocket message too large"})
+                        )
+                        await websocket.close(code=1009)
+                        raise WebSocketDisconnect(code=1009)
+
+                    try:
+                        data = json.loads(raw_text)
+                    except json.JSONDecodeError:
+                        logger.error("Invalid JSON received")
+                        continue
+
+                    # Apply tighter limits to the fields that can trigger expensive work.
+                    text_input = data.get("text")
+                    if isinstance(text_input, str) and len(text_input) > MAX_TEXT_INPUT_LENGTH:
+                        logger.warning(f"Text input from {client_uid} exceeded the 16 KiB limit")
+                        await websocket.send_text(
+                            json.dumps({"type": "error", "message": "Text input too large"})
+                        )
+                        continue
+
+                    images = data.get("images")
+                    if isinstance(images, list):
+                        if len(images) > MAX_IMAGES:
+                            logger.warning(f"Too many images in message from {client_uid}")
+                            await websocket.send_text(
+                                json.dumps({"type": "error", "message": "Too many images"})
+                            )
+                            continue
+                        if any(isinstance(img, str) and len(img.encode("utf-8")) > MAX_IMAGE_DATA_BYTES for img in images):
+                            logger.warning(f"Image payload too large from {client_uid}")
+                            await websocket.send_text(
+                                json.dumps({"type": "error", "message": "Image payload too large"})
+                            )
+                            continue
+
                     message_handler.handle_message(client_uid, data)
                     await self._route_message(websocket, client_uid, data)
                 except WebSocketDisconnect:

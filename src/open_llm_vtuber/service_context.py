@@ -1,5 +1,6 @@
 import os
 import json
+from pathlib import Path
 from typing import Callable
 from loguru import logger
 from fastapi import WebSocket
@@ -92,7 +93,7 @@ class ServiceContext:
 
     # ==== Initializers
 
-    async def _init_mcp_components(self, use_mcpp, enabled_servers):
+    async def _init_mcp_components(self, use_mcpp, enabled_servers, allowed_tools=None):
         """Initializes MCP components based on configuration, dynamically fetching tool info."""
         logger.debug(
             f"Initializing MCP components: use_mcpp={use_mcpp}, enabled_servers={enabled_servers}"
@@ -124,7 +125,7 @@ class ServiceContext:
                     mcp_prompt_string,
                     openai_tools,
                     claude_tools,
-                ) = await self.tool_adapter.get_tools(enabled_servers)
+                ) = await self.tool_adapter.get_tools(enabled_servers, allowed_tools)
                 # Store the generated prompt string
                 self.mcp_prompt = mcp_prompt_string
                 logger.info(
@@ -168,7 +169,7 @@ class ServiceContext:
 
             # 5. Initialize ToolExecutor
             if self.mcp_client and self.tool_manager:
-                self.tool_executor = ToolExecutor(self.mcp_client, self.tool_manager)
+                self.tool_executor = ToolExecutor(self.mcp_client, self.tool_manager, allowed_tools)
                 logger.info("ToolExecutor initialized for this session.")
             else:
                 logger.warning(
@@ -242,6 +243,7 @@ class ServiceContext:
         await self._init_mcp_components(
             self.character_config.agent_config.agent_settings.basic_memory_agent.use_mcpp,
             self.character_config.agent_config.agent_settings.basic_memory_agent.mcp_enabled_servers,
+            self.character_config.agent_config.agent_settings.basic_memory_agent.mcp_allowed_tools,
         )
 
         logger.debug(f"Loaded service context with cache: {character_config}")
@@ -294,6 +296,7 @@ class ServiceContext:
         await self._init_mcp_components(
             config.character_config.agent_config.agent_settings.basic_memory_agent.use_mcpp,
             config.character_config.agent_config.agent_settings.basic_memory_agent.mcp_enabled_servers,
+            config.character_config.agent_config.agent_settings.basic_memory_agent.mcp_allowed_tools,
         )
 
         # init agent from character config
@@ -492,14 +495,20 @@ class ServiceContext:
                 )
             else:
                 # Load alternative config and merge with base config
-                characters_dir = self.system_config.config_alts_dir
-                file_path = os.path.normpath(
-                    os.path.join(characters_dir, config_file_name)
-                )
-                if not file_path.startswith(characters_dir):
+                characters_dir = Path(self.system_config.config_alts_dir).resolve()
+                requested_path = Path(config_file_name)
+                file_path = (characters_dir / requested_path).resolve()
+
+                # Prevent path traversal and symlink escapes outside config_alts_dir.
+                try:
+                    file_path.relative_to(characters_dir)
+                except ValueError:
                     raise ValueError("Invalid configuration file path")
 
-                alt_config_data = read_yaml(file_path).get("character_config")
+                if not file_path.is_file() or file_path.suffix.lower() != ".yaml":
+                    raise ValueError("Invalid configuration file")
+
+                alt_config_data = read_yaml(str(file_path)).get("character_config")
 
                 # Start with original config data and perform a deep merge
                 new_character_config_data = deep_merge(
