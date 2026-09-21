@@ -73,8 +73,6 @@ character_config:
         # 'Plus' means that it has the ability to call tools by using OpenAI API.
         use_mcpp: True
         mcp_enabled_servers: ["time", "ddg-search"] # Enabled MCP servers
-        artifact_generation_enabled: True
-        artifact_allowed_tools: ["artifact_create_file", "artifact_create_project", "artifact_edit_file", "artifact_list", "artifact_create_document", "artifact_create_spreadsheet", "artifact_create_pdf", "artifact_create_presentation", "artifact_convert"]
         # Security: only tools explicitly listed here can be executed by the LLM.
         # Empty list = MCP tools remain visible to the app but execution is blocked.
         # Add exact MCP tool names you trust after reviewing each server.

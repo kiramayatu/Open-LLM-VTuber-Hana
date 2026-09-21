@@ -86,7 +86,7 @@ class AgentFactory:
                 artifact_generation_enabled=basic_memory_settings.get("artifact_generation_enabled", True),
                 artifact_allowed_tools=basic_memory_settings.get(
                     "artifact_allowed_tools",
-                    ["artifact_create_file", "artifact_create_project", "artifact_edit_file", "artifact_list", "artifact_create_document", "artifact_create_spreadsheet", "artifact_create_pdf", "artifact_create_presentation", "artifact_convert"],
+                    ["artifact_create_file", "artifact_create_project", "artifact_edit_file", "artifact_list", "artifact_convert"],
                 ),
                 artifact_generation_max_concurrent_jobs=basic_memory_settings.get(
                     "artifact_generation_max_concurrent_jobs", 2

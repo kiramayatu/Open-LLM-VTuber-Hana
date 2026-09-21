@@ -1,11 +1,12 @@
 import os
 import json
 import asyncio
+import secrets
 from uuid import uuid4
 from pathlib import Path
 import numpy as np
 from datetime import datetime
-from fastapi import APIRouter, WebSocket, UploadFile, File, Response, Depends, HTTPException, status
+from fastapi import APIRouter, WebSocket, UploadFile, File, Response, Depends, HTTPException, status, Query
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from starlette.responses import JSONResponse, FileResponse
 from starlette.websockets import WebSocketDisconnect
@@ -18,6 +19,21 @@ from .artifacts.manager import ArtifactManager
 from .artifacts.workspace import WorkspaceManager
 
 security = HTTPBearer(auto_error=False)
+
+
+def _normalize_api_key(value: str | None) -> str:
+    """Normalize a user-supplied API key without changing its configured value.
+
+    Browsers/settings can preserve surrounding quotes when users paste a YAML-style
+    value such as 'olv_...'. Authentication should treat only matching outer quotes
+    as formatting noise; embedded quotes remain part of the credential.
+    """
+    if value is None:
+        return ""
+    value = value.strip()
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
+        value = value[1:-1].strip()
+    return value
 
 # TTS WebSocket limits to prevent unauthenticated/abusive clients from
 # exhausting CPU/GPU resources with huge text or request bursts.
@@ -40,14 +56,15 @@ async def get_current_api_key(
     auth: HTTPAuthorizationCredentials = Depends(security),
 ):
     """Dependency to validate the API key from the Authorization header"""
-    expected_api_key = default_context_cache.system_config.api_key
+    expected_api_key = _normalize_api_key(default_context_cache.system_config.api_key)
     if not expected_api_key:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Server API key is not configured",
         )
 
-    if not auth or auth.credentials != expected_api_key:
+    provided = _normalize_api_key(auth.credentials if auth else None)
+    if not auth or not secrets.compare_digest(provided, expected_api_key):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid or Missing API Key",
@@ -80,7 +97,7 @@ def init_client_ws_route(default_context_cache: ServiceContext) -> APIRouter:
         await websocket.accept()
 
         # Handle authentication (fail closed; an empty API key never disables auth)
-        expected_api_key = default_context_cache.system_config.api_key
+        expected_api_key = _normalize_api_key(default_context_cache.system_config.api_key)
         if not expected_api_key:
             logger.error("WebSocket connection rejected: server API key is not configured")
             await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
@@ -91,11 +108,11 @@ def init_client_ws_route(default_context_cache: ServiceContext) -> APIRouter:
             # authentication flow robust against frontend message-ordering issues.
             query_api_key = websocket.query_params.get("api_key")
             if query_api_key:
-                supplied_api_key = query_api_key
+                supplied_api_key = _normalize_api_key(query_api_key)
             else:
                 # Backward-compatible fallback: require the first frame to be auth.
                 auth_msg = await asyncio.wait_for(websocket.receive_json(), timeout=5.0)
-                supplied_api_key = auth_msg.get("api_key") if auth_msg.get("type") == "auth" else None
+                supplied_api_key = _normalize_api_key(auth_msg.get("api_key")) if auth_msg.get("type") == "auth" else None
 
             if supplied_api_key != expected_api_key:
                 logger.warning("WebSocket authentication failed")
@@ -170,8 +187,17 @@ def _cleanup_temp_file(path: str) -> None:
 def init_artifact_download_routes(default_context_cache: ServiceContext) -> APIRouter:
     router = APIRouter()
 
-    async def verify_api_key(auth: HTTPAuthorizationCredentials = Depends(security)):
-        return await get_current_api_key(default_context_cache, auth)
+    async def verify_api_key(
+        auth: HTTPAuthorizationCredentials = Depends(security),
+        query_api_key: str | None = Query(default=None, alias="api_key"),
+    ):
+        expected = _normalize_api_key(default_context_cache.system_config.api_key)
+        if not expected:
+            raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Server API key is not configured")
+        provided = _normalize_api_key(auth.credentials if auth else query_api_key)
+        if not provided or not secrets.compare_digest(provided, expected):
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or Missing API Key", headers={"WWW-Authenticate": "Bearer"})
+        return provided
 
     @router.get("/artifacts/{artifact_id}/download", dependencies=[Depends(verify_api_key)])
     async def download_artifact(artifact_id: str):
@@ -348,8 +374,17 @@ def init_webtool_routes(default_context_cache: ServiceContext) -> APIRouter:
     router = APIRouter()
 
     # Pass default_context_cache to dependencies
-    async def verify_api_key(auth: HTTPAuthorizationCredentials = Depends(security)):
-        return await get_current_api_key(default_context_cache, auth)
+    async def verify_api_key(
+        auth: HTTPAuthorizationCredentials = Depends(security),
+        query_api_key: str | None = Query(default=None, alias="api_key"),
+    ):
+        expected = default_context_cache.system_config.api_key
+        if not expected:
+            raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Server API key is not configured")
+        provided = _normalize_api_key(auth.credentials if auth else query_api_key)
+        if not provided or not secrets.compare_digest(provided, expected):
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or Missing API Key", headers={"WWW-Authenticate": "Bearer"})
+        return provided
 
     @router.get("/web-tool")
     async def web_tool_redirect():
@@ -483,7 +518,7 @@ def init_webtool_routes(default_context_cache: ServiceContext) -> APIRouter:
         await websocket.accept()
 
         # Handle authentication (fail closed; an empty API key never disables auth)
-        expected_api_key = default_context_cache.system_config.api_key
+        expected_api_key = _normalize_api_key(default_context_cache.system_config.api_key)
         if not expected_api_key:
             logger.error("TTS WebSocket connection rejected: server API key is not configured")
             await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
@@ -493,10 +528,10 @@ def init_webtool_routes(default_context_cache: ServiceContext) -> APIRouter:
             # Prefer the API key supplied in the WebSocket URL.
             query_api_key = websocket.query_params.get("api_key")
             if query_api_key:
-                supplied_api_key = query_api_key
+                supplied_api_key = _normalize_api_key(query_api_key)
             else:
                 auth_msg = await asyncio.wait_for(websocket.receive_json(), timeout=5.0)
-                supplied_api_key = auth_msg.get("api_key") if auth_msg.get("type") == "auth" else None
+                supplied_api_key = _normalize_api_key(auth_msg.get("api_key")) if auth_msg.get("type") == "auth" else None
 
             if supplied_api_key != expected_api_key:
                 logger.warning("TTS WebSocket authentication failed")

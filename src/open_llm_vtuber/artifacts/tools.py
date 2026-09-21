@@ -6,6 +6,8 @@ from __future__ import annotations
 
 from typing import Any
 from pathlib import Path
+import csv
+from io import StringIO
 from .workspace import WorkspaceManager
 from .manager import ArtifactManager
 from .types import ArtifactType
@@ -20,8 +22,8 @@ CREATE_ARTIFACT_TOOL = {
         "name": "artifact_create_file",
         "description": (
             "Create one new text/code file in the current assistant workspace. "
-            "Use this when the user explicitly asks for a text or code file. "
-            "For .docx, .xlsx, .pdf, and .pptx use the dedicated document generators. "
+            "Use this for plain text or source-code files such as .txt, .md, .json, .csv, .html, .css, .js, .py. "
+            "DO NOT use this tool for .docx, .xlsx, .pdf, or .pptx; use the dedicated generator tool for those formats. "
             "Do not overwrite an existing file."
         ),
         "parameters": {
@@ -111,7 +113,7 @@ CREATE_DOCX_TOOL = {
     "type": "function",
     "function": {
         "name": "artifact_create_document",
-        "description": "Create a real Microsoft Word DOCX document. Use this for requests mentioning Word, Microsoft Word, or .docx. Do NOT use artifact_create_file for .docx.",
+        "description": "Create a real Microsoft Word .docx document from a title and paragraphs. Use this tool whenever the user asks for a Word document, DOCX, or Microsoft Word file.",
         "parameters": {
             "type": "object",
             "properties": {
@@ -129,7 +131,7 @@ CREATE_XLSX_TOOL = {
     "type": "function",
     "function": {
         "name": "artifact_create_spreadsheet",
-        "description": "Create a real Microsoft Excel XLSX workbook. Use this for requests mentioning Excel, spreadsheet, or .xlsx. Do NOT use artifact_create_file for .xlsx.",
+        "description": "Create a real Microsoft Excel .xlsx workbook from structured sheets and rows. Use this tool whenever the user asks for an Excel spreadsheet, XLSX, or Microsoft Excel file.",
         "parameters": {
             "type": "object",
             "properties": {
@@ -156,7 +158,7 @@ CREATE_PDF_TOOL = {
     "type": "function",
     "function": {
         "name": "artifact_create_pdf",
-        "description": "Create a real PDF document. Use this for requests mentioning PDF or .pdf. Do NOT use artifact_create_file for .pdf.",
+        "description": "Create a real PDF document from a title and paragraphs. Use this tool whenever the user asks for a PDF file.",
         "parameters": {
             "type": "object",
             "properties": {
@@ -174,7 +176,7 @@ CREATE_PPTX_TOOL = {
     "type": "function",
     "function": {
         "name": "artifact_create_presentation",
-        "description": "Create a real Microsoft PowerPoint PPTX presentation. Use this for requests mentioning PowerPoint, presentation, or .pptx. Do NOT use artifact_create_file for .pptx.",
+        "description": "Create a real Microsoft PowerPoint .pptx presentation. Use this tool whenever the user asks for PowerPoint, PPTX, or a presentation.",
         "parameters": {
             "type": "object",
             "properties": {
@@ -198,24 +200,27 @@ CREATE_PPTX_TOOL = {
     },
 }
 
-
 CONVERT_ARTIFACT_TOOL = {
     "type": "function",
     "function": {
         "name": "artifact_convert",
         "description": (
-            "Convert an existing artifact to another supported format. Use this when the user says convert, change format, export to another format, or similar. The original artifact is always preserved and a new artifact is created. Do NOT call artifact_create_file directly for a format conversion."
+            "Convert an existing artifact to another supported format. Use this whenever the user asks to convert, change format, export, or turn one existing artifact into another format. "
+            "Create a new artifact and preserve the original. Supported conversions include "
+            "DOCX to TXT/MD, TXT/MD to DOCX, CSV to XLSX, and XLSX to CSV."
         ),
         "parameters": {
             "type": "object",
             "properties": {
-                "artifact_id": {"type": "string", "description": "Stable ID of the source artifact"},
+                "artifact_id": {"type": "string"},
                 "target_format": {
                     "type": "string",
                     "enum": ["txt", "md", "docx", "csv", "xlsx"],
-                    "description": "Target format"
                 },
-                "filename": {"type": "string", "description": "Optional output filename"},
+                "filename": {
+                    "type": "string",
+                    "description": "Optional output filename. Extension is enforced by the conversion target.",
+                },
             },
             "required": ["artifact_id", "target_format"],
             "additionalProperties": False,
@@ -308,11 +313,10 @@ class ArtifactToolService:
             raise ValueError("filename must be a non-empty string")
         if not isinstance(content, str):
             raise ValueError("content must be a string")
-        suffix = Path(filename.strip()).suffix.lower()
-        binary_formats = {".docx": "docx", ".xlsx": "xlsx", ".pdf": "pdf", ".pptx": "pptx"}
-        if suffix in binary_formats:
-            kind = binary_formats[suffix]
-            raise ValueError(f"FORMAT_REQUIRES_GENERATOR:{kind}:Use the dedicated artifact generator for {suffix} files")
+        ext = Path(filename).suffix.lower()
+        generator_only = {".docx": "artifact_create_document", ".xlsx": "artifact_create_spreadsheet", ".pdf": "artifact_create_pdf", ".pptx": "artifact_create_presentation"}
+        if ext in generator_only:
+            raise ValueError(f"Use {generator_only[ext]} for {ext} files; artifact_create_file only creates text/code files.")
         # Creation-only: the workspace layer performs an atomic create-if-absent.
         path = self.workspace_manager.create_bytes(
             workspace_id, filename, content.encode("utf-8")
@@ -369,10 +373,16 @@ class ArtifactToolService:
             raise ValueError("Generated file exceeds workspace file-size limit")
         path = self.workspace_manager.create_bytes(workspace_id, filename, data)
         rel = path.relative_to(self.workspace_manager.require(workspace_id).root_path).as_posix()
-        artifact = self.artifact_manager.create(
-            name=path.name, artifact_type=artifact_type, mime_type=mime,
-            workspace_id=workspace_id, path=rel, size=len(data),
-        )
+        try:
+            artifact = self.artifact_manager.create(
+                name=path.name, artifact_type=artifact_type, mime_type=mime,
+                workspace_id=workspace_id, path=rel, size=len(data),
+            )
+        except Exception:
+            try:
+                self.workspace_manager.delete_file(workspace_id, rel)
+            finally:
+                raise
         return artifact.to_dict()
 
     def create_generated_file(
@@ -408,101 +418,72 @@ class ArtifactToolService:
         return self._create_generated_file(filename, generate_pptx(title=title, slides=slides), ArtifactType.PRESENTATION, mime)
 
     def convert_artifact(self, artifact_id: str, target_format: str, filename: str | None = None) -> dict[str, Any]:
-        """Convert a managed artifact to a supported target format and create a new artifact."""
+        """Convert a managed artifact into a new artifact, preserving the original."""
         workspace_id = self._ensure_workspace()
         artifact = self.artifact_manager.require(artifact_id)
         if artifact.workspace_id != workspace_id:
             raise PermissionError("Artifact does not belong to the current workspace")
-        if not artifact.path or not artifact.name:
-            raise ValueError("Artifact has no source file")
-
+        if not artifact.path:
+            raise ValueError("Artifact has no file path")
         source_path = self.workspace_manager._resolve_file(workspace_id, artifact.path)
-        if source_path.is_symlink() or not source_path.is_file():
-            raise FileNotFoundError("Source artifact file not found")
-        target = target_format.strip().lower().lstrip(".")
-        supported = {"txt", "md", "docx", "csv", "xlsx"}
-        if target not in supported:
-            raise ValueError(f"Unsupported target format: {target}")
+        if source_path.is_symlink() or not source_path.exists() or not source_path.is_file():
+            raise FileNotFoundError("Artifact file not found")
 
         source_ext = Path(artifact.name).suffix.lower()
-        if filename:
-            output_name = filename.strip()
-        else:
-            output_name = Path(artifact.name).stem + "." + target
+        target = str(target_format).lower().lstrip(".")
+        conversion_key = (source_ext, target)
+        raw = self.workspace_manager.read_bytes(workspace_id, artifact.path)
 
-        if not output_name.lower().endswith("." + target):
-            output_name += "." + target
-
-        # Conversion always creates a new artifact. If the natural output name
-        # already exists (or the chosen converted name collides), choose a
-        # deterministic non-destructive name.
-        candidate = Path(output_name)
-        suffix = candidate.suffix
-        stem = candidate.stem
-        parent = candidate.parent
-        counter = 0
-        while True:
-            rel_candidate = parent / (
-                f"{stem}_converted{suffix}"
-                if counter == 0
-                else f"{stem}_converted_{counter}{suffix}"
-            )
-            try:
-                resolved_candidate = self.workspace_manager._resolve_file(
-                    workspace_id, rel_candidate.as_posix()
-                )
-                exists = resolved_candidate.exists()
-            except Exception:
-                exists = False
-            if not exists:
-                output_name = rel_candidate.as_posix()
-                break
-            counter += 1
-            if counter > 1000:
-                raise ValueError("Unable to select a unique converted artifact filename")
-
-        # Read source into bounded memory using the existing file limits.
-        if source_path.stat().st_size > self.workspace_manager.max_file_size:
-            raise ValueError("Source artifact exceeds workspace file-size limit")
-
-        text = None
-        if source_ext in {".txt", ".md", ".csv"}:
-            text = source_path.read_text(encoding="utf-8")
-        elif source_ext == ".docx":
+        if conversion_key in {(".docx", "txt"), (".docx", "md")} :
             from docx import Document
-            doc = Document(source_path)
-            text = "\n\n".join(p.text for p in doc.paragraphs)
-        elif source_ext == ".xlsx":
+            doc = Document(StringIO(raw.decode("utf-8"))) if False else Document(source_path)
+            lines = []
+            for paragraph in doc.paragraphs:
+                text = paragraph.text
+                if text:
+                    lines.append(text)
+            content = "\n\n".join(lines).encode("utf-8")
+            default_ext = target
+        elif conversion_key in {(".txt", "docx"), (".md", "docx")}:
+            from docx import Document
+            text = raw.decode("utf-8")
+            title = Path(artifact.name).stem
+            data = generate_docx(title=title, paragraphs=text.splitlines())
+            content = data
+            default_ext = "docx"
+        elif conversion_key == (".csv", "xlsx"):
+            from openpyxl import Workbook
+            wb = Workbook(write_only=True)
+            ws = wb.create_sheet(title="Sheet1")
+            text = raw.decode("utf-8-sig")
+            reader = csv.reader(StringIO(text))
+            for row in reader:
+                ws.append([_safe_excel_value(v) for v in row])
+            out = BytesIO()
+            wb.save(out)
+            wb.close()
+            content = out.getvalue()
+            default_ext = "xlsx"
+        elif conversion_key == (".xlsx", "csv"):
             from openpyxl import load_workbook
             wb = load_workbook(source_path, read_only=True, data_only=True)
             try:
-                chunks = []
-                for ws in wb.worksheets:
-                    chunks.append(f"# {ws.title}")
-                    for row in ws.iter_rows(values_only=True):
-                        chunks.append(",".join("" if v is None else str(v) for v in row))
-                text = "\n".join(chunks)
+                target_ws = wb.active
+                out = StringIO(newline="")
+                writer = csv.writer(out)
+                for row in target_ws.iter_rows(values_only=True):
+                    writer.writerow(["" if v is None else str(v) for v in row])
+                content = out.getvalue().encode("utf-8")
             finally:
                 wb.close()
+            default_ext = "csv"
         else:
-            raise ValueError(f"Conversion from {source_ext or 'unknown'} is not supported")
+            raise ValueError(f"Unsupported conversion: {source_ext or 'unknown'} -> {target}")
 
-        if text is None:
-            raise ValueError("Unable to read source artifact")
-        encoded = text.encode("utf-8")
-        if len(encoded) > 10 * 1024 * 1024:
-            raise ValueError("Converted text exceeds 10 MiB limit")
-
-        if target in {"txt", "md"}:
-            return self.create_file(output_name, text)
-        if target == "docx":
-            return self.create_document(output_name, Path(output_name).stem, text.splitlines())
-        if target == "csv":
-            return self.create_file(output_name, text)
-        if target == "xlsx":
-            rows = [line.split(",") for line in text.splitlines() if line.strip()]
-            return self.create_spreadsheet(output_name, [{"name": "Sheet1", "rows": rows}])
-        raise ValueError(f"Unsupported target format: {target}")
+        base = str(filename).strip() if filename else Path(artifact.name).stem + "." + default_ext
+        if not base.lower().endswith("." + default_ext):
+            base = Path(base).stem + "." + default_ext
+        return self._create_generated_file(base, content, ArtifactType.DOCUMENT if default_ext in {"docx", "pdf"} else (ArtifactType.SPREADSHEET if default_ext == "xlsx" else ArtifactType.FILE), _guess_mime(base))
 
     def list_artifacts(self) -> list[dict[str, Any]]:
         workspace_id = self._ensure_workspace()

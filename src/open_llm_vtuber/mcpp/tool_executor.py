@@ -1,6 +1,8 @@
 import json
 import datetime
 import asyncio
+import csv
+from io import StringIO
 from pathlib import Path
 from loguru import logger
 from typing import (
@@ -360,57 +362,88 @@ class ToolExecutor:
                 if not isinstance(tool_input, dict):
                     raise ValueError("Artifact tool input must be an object")
                 if tool_name == "artifact_create_file":
-                    filename = str(tool_input.get("filename", "")).strip()
+                    filename = tool_input.get("filename", "")
                     content = tool_input.get("content", "")
-                    suffix = Path(filename).suffix.lower()
-                    # Safety net for models that select artifact_create_file for a
-                    # binary document extension. Route to the real generator instead
-                    # of creating a text file with a misleading extension.
-                    if suffix == ".docx":
-                        data = await self._artifact_generation.run(
-                            generate_docx,
-                            title=Path(filename).stem,
-                            paragraphs=str(content).splitlines() or [""],
-                        )
-                        artifact = self._artifact_service.create_generated_file(
-                            filename, data, "document", "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-                        )
-                    elif suffix == ".pdf":
-                        data = await self._artifact_generation.run(
-                            generate_pdf,
-                            title=Path(filename).stem,
-                            paragraphs=str(content).splitlines() or [""],
-                        )
-                        artifact = self._artifact_service.create_generated_file(
-                            filename, data, "document", "application/pdf"
-                        )
-                    elif suffix == ".pptx":
-                        lines = str(content).splitlines() or [""]
-                        data = await self._artifact_generation.run(
-                            generate_pptx,
-                            title=Path(filename).stem,
-                            slides=[{"title": Path(filename).stem, "bullets": lines}],
-                        )
-                        artifact = self._artifact_service.create_generated_file(
-                            filename, data, "presentation", "application/vnd.openxmlformats-officedocument.presentationml.presentation"
-                        )
-                    elif suffix == ".xlsx":
-                        rows = [line.split("\t") if "\t" in line else line.split(",") for line in str(content).splitlines() if line.strip()]
-                        data = await self._artifact_generation.run(
-                            generate_xlsx,
-                            sheets=[{"name": "Sheet1", "rows": rows or [[str(content)]]}],
-                        )
-                        artifact = self._artifact_service.create_generated_file(
-                            filename, data, "spreadsheet", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                        )
+                    ext = Path(filename).suffix.lower() if isinstance(filename, str) else ""
+
+                    # Safety/compatibility net: local models sometimes call the generic
+                    # text-file tool with a binary document extension even when the
+                    # dedicated generator is available. Route it through the proper
+                    # generator instead of creating a fake .docx/.xlsx/.pdf/.pptx.
+                    legacy_routes = {
+                        ".docx": "artifact_create_document",
+                        ".pdf": "artifact_create_pdf",
+                        ".pptx": "artifact_create_presentation",
+                        ".xlsx": "artifact_create_spreadsheet",
+                    }
+                    routed_tool = legacy_routes.get(ext)
+                    if routed_tool:
+                        if routed_tool not in self._artifact_allowed_tools:
+                            raise PermissionError(
+                                f"Dedicated generator '{routed_tool}' is not permitted"
+                            )
+                        title = Path(filename).stem or "Document"
+                        if not isinstance(content, str):
+                            raise ValueError("content must be a string")
+                        if routed_tool in {"artifact_create_document", "artifact_create_pdf"}:
+                            paragraphs = content.splitlines() or [content]
+                            if routed_tool == "artifact_create_document":
+                                artifact = await self._artifact_generation.run(
+                                    self._artifact_service.create_document, filename, title, paragraphs
+                                ) if False else None
+                                data = await self._artifact_generation.run(
+                                    generate_docx, title=title, paragraphs=paragraphs
+                                )
+                                _, mime = extension_for("docx")
+                                artifact = self._artifact_service.create_generated_file(
+                                    filename, data, "document", mime
+                                )
+                            else:
+                                data = await self._artifact_generation.run(
+                                    generate_pdf, title=title, paragraphs=paragraphs
+                                )
+                                _, mime = extension_for("pdf")
+                                artifact = self._artifact_service.create_generated_file(
+                                    filename, data, "document", mime
+                                )
+                        elif routed_tool == "artifact_create_presentation":
+                            bullets = [line.strip() for line in content.splitlines() if line.strip()]
+                            slides = [{"title": title, "bullets": bullets[:50] or [content[:1000]]}]
+                            data = await self._artifact_generation.run(
+                                generate_pptx, title=title, slides=slides
+                            )
+                            _, mime = extension_for("pptx")
+                            artifact = self._artifact_service.create_generated_file(
+                                filename, data, "presentation", mime
+                            )
+                        else:
+                            # Treat plain/CSV-like content as one worksheet. This produces
+                            # a valid workbook even when the model used the generic tool.
+                            rows = []
+                            for row in csv.reader(StringIO(content)):
+                                rows.append(row)
+                            if not rows:
+                                rows = [[content]]
+                            data = await self._artifact_generation.run(
+                                generate_xlsx, sheets=[{"name": "Sheet1", "rows": rows}]
+                            )
+                            _, mime = extension_for("xlsx")
+                            artifact = self._artifact_service.create_generated_file(
+                                filename, data, "spreadsheet", mime
+                            )
+                        metadata["artifacts"] = [artifact]
+                        metadata["artifact_operation"] = "created_generated"
+                        text_content = json.dumps({
+                            "artifact": artifact,
+                            "operation": "created_generated",
+                            "generator": routed_tool,
+                        }, ensure_ascii=False)
                     else:
                         artifact = self._artifact_service.create_file(
-                            filename,
-                            content,
-                            tool_input.get("artifact_type"),
+                            filename, content, tool_input.get("artifact_type")
                         )
-                    metadata["artifacts"] = [artifact]
-                    text_content = json.dumps({"artifact": artifact, "operation": "created"}, ensure_ascii=False)
+                        metadata["artifacts"] = [artifact]
+                        text_content = json.dumps({"artifact": artifact}, ensure_ascii=False)
                 elif tool_name == "artifact_create_project":
                     artifacts = self._artifact_service.create_project(
                         tool_input.get("project_name", ""),
@@ -475,15 +508,6 @@ class ToolExecutor:
                     )
                     metadata["artifacts"] = [artifact]
                     text_content = json.dumps({"artifact": artifact}, ensure_ascii=False)
-                elif tool_name == "artifact_convert":
-                    artifact = self._artifact_service.convert_artifact(
-                        tool_input.get("artifact_id", ""),
-                        tool_input.get("target_format", ""),
-                        tool_input.get("filename"),
-                    )
-                    metadata["artifacts"] = [artifact]
-                    metadata["artifact_operation"] = "converted"
-                    text_content = json.dumps({"artifact": artifact, "operation": "converted"}, ensure_ascii=False)
                 elif tool_name == "artifact_create_presentation":
                     filename = tool_input.get("filename", "")
                     expected, mime = extension_for("pptx")
@@ -503,22 +527,26 @@ class ToolExecutor:
                     raise ValueError(f"Unsupported artifact tool: {tool_name}")
                 content_items = [{"type": "text", "text": text_content}]
                 return False, text_content, metadata, content_items
+            except FileExistsError as e:
+                logger.error(f"Artifact tool '{tool_name}' failed: {e}")
+                payload = {"success": False, "error_code": "ARTIFACT_EXISTS", "message": str(e)}
+                text_content = json.dumps(payload, ensure_ascii=False)
+                return True, text_content, metadata, [{"type": "error", "text": text_content}]
+            except PermissionError as e:
+                logger.error(f"Artifact tool '{tool_name}' denied: {e}")
+                payload = {"success": False, "error_code": "ARTIFACT_PERMISSION_DENIED", "message": str(e)}
+                text_content = json.dumps(payload, ensure_ascii=False)
+                return True, text_content, metadata, [{"type": "error", "text": text_content}]
+            except FileNotFoundError as e:
+                logger.error(f"Artifact tool '{tool_name}' failed: {e}")
+                payload = {"success": False, "error_code": "ARTIFACT_NOT_FOUND", "message": str(e)}
+                text_content = json.dumps(payload, ensure_ascii=False)
+                return True, text_content, metadata, [{"type": "error", "text": text_content}]
             except Exception as e:
                 logger.error(f"Artifact tool '{tool_name}' failed: {e}")
-                if isinstance(e, FileExistsError):
-                    error_code = "ARTIFACT_EXISTS"
-                elif isinstance(e, (PermissionError,)): 
-                    error_code = "ARTIFACT_FORBIDDEN"
-                elif isinstance(e, (ValueError, TypeError)):
-                    message = str(e)
-                    error_code = "FORMAT_REQUIRES_GENERATOR" if message.startswith("FORMAT_REQUIRES_GENERATOR:") else "INVALID_ARTIFACT_REQUEST"
-                elif isinstance(e, KeyError):
-                    error_code = "ARTIFACT_NOT_FOUND"
-                else:
-                    error_code = "ARTIFACT_OPERATION_FAILED"
-                payload = {"success": False, "error_code": error_code, "message": str(e), "tool": tool_name}
-                text = json.dumps(payload, ensure_ascii=False)
-                return True, text, metadata, [{"type": "error", "text": text}]
+                payload = {"success": False, "error_code": "ARTIFACT_TOOL_ERROR", "message": str(e)}
+                text_content = json.dumps(payload, ensure_ascii=False)
+                return True, text_content, metadata, [{"type": "error", "text": text_content}]
 
         tool_info = self._tool_manager.get_tool(tool_name) if self._tool_manager else None
 
