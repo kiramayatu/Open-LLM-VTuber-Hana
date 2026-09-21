@@ -2,16 +2,20 @@ import os
 import json
 import asyncio
 from uuid import uuid4
+from pathlib import Path
 import numpy as np
 from datetime import datetime
 from fastapi import APIRouter, WebSocket, UploadFile, File, Response, Depends, HTTPException, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-from starlette.responses import JSONResponse
+from starlette.responses import JSONResponse, FileResponse
 from starlette.websockets import WebSocketDisconnect
+from starlette.background import BackgroundTask
 from loguru import logger
 from .service_context import ServiceContext
 from .websocket_handler import WebSocketHandler
 from .proxy_handler import ProxyHandler
+from .artifacts.manager import ArtifactManager
+from .artifacts.workspace import WorkspaceManager
 
 security = HTTPBearer(auto_error=False)
 
@@ -23,6 +27,12 @@ MAX_TTS_REQUESTS_PER_MINUTE = 20
 MAX_TTS_WS_MESSAGE_BYTES = 128 * 1024
 MAX_TTS_CONNECTIONS = 8
 MAX_CLIENT_CONNECTIONS = 32
+
+# Artifact download/export limits. Keep downloads authenticated and bounded.
+MAX_ARTIFACT_DOWNLOAD_BYTES = 100 * 1024 * 1024
+MAX_WORKSPACE_ZIP_FILES = 1000
+MAX_WORKSPACE_ZIP_BYTES = 500 * 1024 * 1024
+ARTIFACT_DOWNLOAD_TEMP_DIR = "cache/artifact-downloads"
 
 
 async def get_current_api_key(
@@ -139,6 +149,187 @@ def init_proxy_route(default_context_cache: ServiceContext) -> APIRouter:
         except Exception as e:
             logger.error(f"Error in proxy connection: {e}")
             raise
+
+    return router
+
+
+def _artifact_managers() -> tuple[WorkspaceManager, ArtifactManager]:
+    """Open the shared artifact metadata/storage managers used by artifact agents."""
+    workspace_manager = WorkspaceManager("generated_files")
+    artifact_manager = ArtifactManager(workspace_manager._db_path)
+    return workspace_manager, artifact_manager
+
+
+def _cleanup_temp_file(path: str) -> None:
+    try:
+        os.unlink(path)
+    except OSError:
+        pass
+
+
+def init_artifact_download_routes(default_context_cache: ServiceContext) -> APIRouter:
+    router = APIRouter()
+
+    async def verify_api_key(auth: HTTPAuthorizationCredentials = Depends(security)):
+        return await get_current_api_key(default_context_cache, auth)
+
+    @router.get("/artifacts/{artifact_id}/download", dependencies=[Depends(verify_api_key)])
+    async def download_artifact(artifact_id: str):
+        """Download one managed artifact without exposing its filesystem path."""
+        workspace_manager, artifact_manager = _artifact_managers()
+        try:
+            artifact = artifact_manager.require(artifact_id)
+            if artifact.workspace_id is None or not artifact.path:
+                raise HTTPException(status_code=404, detail="Artifact file not found")
+            path = workspace_manager._resolve_file(artifact.workspace_id, artifact.path)
+            if path.is_symlink() or not path.exists() or not path.is_file():
+                raise HTTPException(status_code=404, detail="Artifact file not found")
+            size = path.stat().st_size
+            if size > MAX_ARTIFACT_DOWNLOAD_BYTES:
+                raise HTTPException(status_code=413, detail="Artifact exceeds the download size limit")
+            return FileResponse(
+                path,
+                media_type=artifact.mime_type or "application/octet-stream",
+                filename=artifact.name,
+            )
+        finally:
+            artifact_manager.close()
+            workspace_manager.close()
+
+    @router.get("/workspaces", dependencies=[Depends(verify_api_key)])
+    async def list_artifact_workspaces():
+        """List managed artifact workspaces with bounded storage metadata."""
+        workspace_manager, artifact_manager = _artifact_managers()
+        try:
+            items = []
+            for workspace in workspace_manager.list():
+                items.append({
+                    "workspace_id": workspace.workspace_id,
+                    "name": workspace.name,
+                    "conversation_id": workspace.conversation_id,
+                    "created_at": workspace.created_at,
+                    "updated_at": workspace.updated_at,
+                    "size": workspace_manager.size(workspace.workspace_id),
+                    "file_count": workspace_manager.file_count(workspace.workspace_id),
+                    "artifacts": len(artifact_manager.list(workspace_id=workspace.workspace_id)),
+                })
+            return {
+                "workspaces": items,
+                "total_size": workspace_manager.total_size(),
+                "max_total_size": workspace_manager.max_total_size,
+                "max_workspace_size": workspace_manager.max_workspace_size,
+                "max_files_per_workspace": workspace_manager.max_files_per_workspace,
+            }
+        finally:
+            artifact_manager.close()
+            workspace_manager.close()
+
+    @router.get("/workspaces/{workspace_id}/files", dependencies=[Depends(verify_api_key)])
+    async def list_artifact_workspace_files(workspace_id: str):
+        """List regular files and managed artifacts belonging to one workspace."""
+        workspace_manager, artifact_manager = _artifact_managers()
+        try:
+            workspace = workspace_manager.require(workspace_id)
+            artifacts = {a.path: a for a in artifact_manager.list(workspace_id=workspace_id) if a.path}
+            files = []
+            for rel in workspace_manager.list_files(workspace_id):
+                artifact = artifacts.get(rel)
+                files.append({
+                    "artifact_id": artifact.artifact_id if artifact else None,
+                    "name": artifact.name if artifact else Path(rel).name,
+                    "path": rel,
+                    "mime_type": artifact.mime_type if artifact else None,
+                    "size": Path(workspace.root_path, rel).stat().st_size,
+                    "created_at": artifact.created_at if artifact else None,
+                    "updated_at": artifact.updated_at if artifact else None,
+                })
+            return {
+                "workspace": {
+                    "workspace_id": workspace.workspace_id,
+                    "name": workspace.name,
+                    "size": workspace_manager.size(workspace_id),
+                    "file_count": workspace_manager.file_count(workspace_id),
+                },
+                "files": files,
+            }
+        finally:
+            artifact_manager.close()
+            workspace_manager.close()
+
+    @router.delete("/artifacts/{artifact_id}", dependencies=[Depends(verify_api_key)])
+    async def delete_artifact(artifact_id: str):
+        """Delete one managed artifact and its backing file."""
+        workspace_manager, artifact_manager = _artifact_managers()
+        try:
+            artifact = artifact_manager.require(artifact_id)
+            if artifact.workspace_id is None or not artifact.path:
+                raise HTTPException(status_code=404, detail="Artifact file not found")
+            workspace_manager.delete_file(artifact.workspace_id, artifact.path)
+            artifact_manager.delete(artifact_id)
+            return {"success": True, "artifact_id": artifact_id}
+        except KeyError:
+            raise HTTPException(status_code=404, detail="Artifact not found")
+        finally:
+            artifact_manager.close()
+            workspace_manager.close()
+
+    @router.delete("/workspaces/{workspace_id}", dependencies=[Depends(verify_api_key)])
+    async def delete_artifact_workspace(workspace_id: str):
+        """Delete one workspace and all managed artifacts associated with it."""
+        workspace_manager, artifact_manager = _artifact_managers()
+        try:
+            workspace_manager.require(workspace_id)
+            for artifact in list(artifact_manager.list(workspace_id=workspace_id)):
+                artifact_manager.delete(artifact.artifact_id)
+            workspace_manager.delete(workspace_id, delete_files=True)
+            return {"success": True, "workspace_id": workspace_id}
+        except KeyError:
+            raise HTTPException(status_code=404, detail="Workspace not found")
+        finally:
+            artifact_manager.close()
+            workspace_manager.close()
+
+    @router.get("/workspaces/{workspace_id}/download.zip", dependencies=[Depends(verify_api_key)])
+    async def download_workspace_zip(workspace_id: str):
+        """Create a bounded temporary ZIP of one managed workspace and delete it after response."""
+        import tempfile
+        import zipfile
+
+        workspace_manager, artifact_manager = _artifact_managers()
+        try:
+            workspace = workspace_manager.require(workspace_id)
+            files = workspace_manager.list_files(workspace_id)
+            if len(files) > MAX_WORKSPACE_ZIP_FILES:
+                raise HTTPException(status_code=413, detail="Workspace contains too many files to export")
+            total = sum(workspace_manager.require(workspace_id).root_path.joinpath(rel).stat().st_size for rel in files)
+            if total > MAX_WORKSPACE_ZIP_BYTES:
+                raise HTTPException(status_code=413, detail="Workspace exceeds the ZIP export limit")
+
+            temp_dir = Path(ARTIFACT_DOWNLOAD_TEMP_DIR)
+            temp_dir.mkdir(parents=True, exist_ok=True)
+            fd, temp_name = tempfile.mkstemp(prefix="artifact-", suffix=".zip", dir=temp_dir)
+            os.close(fd)
+            root = workspace.root_path
+            try:
+                with zipfile.ZipFile(temp_name, "w", compression=zipfile.ZIP_DEFLATED, allowZip64=False) as archive:
+                    for rel in files:
+                        src = workspace_manager._resolve_file(workspace_id, rel)
+                        if src.is_symlink() or not src.is_file():
+                            raise HTTPException(status_code=404, detail="Workspace contains an invalid file")
+                        archive.write(src, arcname=rel)
+            except Exception:
+                _cleanup_temp_file(temp_name)
+                raise
+
+            return FileResponse(
+                temp_name,
+                media_type="application/zip",
+                filename=f"{workspace_id}.zip",
+                background=BackgroundTask(_cleanup_temp_file, temp_name),
+            )
+        finally:
+            artifact_manager.close()
+            workspace_manager.close()
 
     return router
 

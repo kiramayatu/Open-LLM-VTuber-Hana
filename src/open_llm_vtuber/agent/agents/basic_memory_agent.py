@@ -28,6 +28,9 @@ from ...mcpp.tool_manager import ToolManager
 from ...mcpp.json_detector import StreamJSONDetector
 from ...mcpp.types import ToolCallObject
 from ...mcpp.tool_executor import ToolExecutor
+from ...artifacts.workspace import WorkspaceManager
+from ...artifacts.manager import ArtifactManager
+from ...artifacts.tools import ARTIFACT_TOOL_NAMES, ARTIFACT_TOOLS_OPENAI, ARTIFACT_TOOLS_CLAUDE, ArtifactToolService
 
 
 class BasicMemoryAgent(AgentInterface):
@@ -49,6 +52,12 @@ class BasicMemoryAgent(AgentInterface):
         tool_manager: Optional[ToolManager] = None,
         tool_executor: Optional[ToolExecutor] = None,
         mcp_prompt_string: str = "",
+        artifact_generation_enabled: bool = True,
+        artifact_allowed_tools: Optional[list[str]] = None,
+        artifact_workspace_root: str = "generated_files",
+        artifact_workspace_conversation_id: str | None = None,
+        artifact_generation_max_concurrent_jobs: int = 2,
+        artifact_generation_max_job_seconds: float = 60.0,
     ):
         """Initialize agent with LLM and configuration."""
         super().__init__()
@@ -67,6 +76,39 @@ class BasicMemoryAgent(AgentInterface):
         self._tool_executor = tool_executor
         self._mcp_prompt_string = mcp_prompt_string
         self._json_detector = StreamJSONDetector()
+        self._artifact_generation_enabled = bool(artifact_generation_enabled)
+        self._artifact_allowed_tools = set(artifact_allowed_tools or [])
+        self._artifact_workspace_manager = WorkspaceManager(artifact_workspace_root) if self._artifact_generation_enabled else None
+        self._artifact_manager = ArtifactManager(
+            self._artifact_workspace_manager._db_path
+        ) if self._artifact_workspace_manager else None
+        self._artifact_workspace_conversation_id = artifact_workspace_conversation_id
+        self._artifact_service = (
+            ArtifactToolService(
+                self._artifact_workspace_manager,
+                self._artifact_manager,
+                conversation_id=self._artifact_workspace_conversation_id,
+            )
+            if self._artifact_workspace_manager and self._artifact_manager
+            else None
+        )
+        if self._artifact_service is not None and self._tool_executor is None:
+            self._tool_executor = ToolExecutor(
+                mcp_client=None,
+                tool_manager=tool_manager,
+                allowed_tools=[],
+                artifact_service=self._artifact_service,
+                artifact_allowed_tools=self._artifact_allowed_tools,
+                artifact_generation_max_concurrent_jobs=artifact_generation_max_concurrent_jobs,
+                artifact_generation_max_job_seconds=artifact_generation_max_job_seconds,
+            )
+        elif self._tool_executor is not None and hasattr(self._tool_executor, "_artifact_service"):
+            self._tool_executor._artifact_service = self._artifact_service
+            self._tool_executor._artifact_allowed_tools = set(self._artifact_allowed_tools)
+            self._tool_executor.configure_artifact_generation(
+                max_concurrent_jobs=artifact_generation_max_concurrent_jobs,
+                max_job_seconds=artifact_generation_max_job_seconds,
+            )
 
         self._formatted_tools_openai = []
         self._formatted_tools_claude = []
@@ -79,6 +121,15 @@ class BasicMemoryAgent(AgentInterface):
             )
             logger.debug(
                 f"Agent received pre-formatted tools - OpenAI: {len(self._formatted_tools_openai)}, Claude: {len(self._formatted_tools_claude)}"
+            )
+        if self._artifact_generation_enabled:
+            self._formatted_tools_openai.extend(
+                tool for tool in ARTIFACT_TOOLS_OPENAI
+                if tool["function"]["name"] in self._artifact_allowed_tools
+            )
+            self._formatted_tools_claude.extend(
+                tool for tool in ARTIFACT_TOOLS_CLAUDE
+                if tool["name"] in self._artifact_allowed_tools
             )
         else:
             logger.debug(
@@ -98,13 +149,7 @@ class BasicMemoryAgent(AgentInterface):
             logger.warning(
                 "use_mcpp is True, but some MCP components are missing in the agent. Tool calling might not work as expected."
             )
-        elif not self._use_mcpp and any(
-            [
-                self._tool_manager,
-                self._tool_executor,
-                self._json_detector,
-            ]
-        ):
+        elif not self._use_mcpp and self._tool_manager is not None:
             logger.warning(
                 "use_mcpp is False, but some MCP components were passed to the agent."
             )
@@ -603,7 +648,7 @@ class BasicMemoryAgent(AgentInterface):
             tool_mode = None
             llm_supports_native_tools = False
 
-            if self._use_mcpp and self._tool_manager:
+            if (self._use_mcpp and self._tool_manager) or self._artifact_generation_enabled:
                 tools = None
                 if isinstance(self._llm, ClaudeAsyncLLM):
                     tool_mode = "Claude"
@@ -623,7 +668,7 @@ class BasicMemoryAgent(AgentInterface):
                         f"No tools available/formatted for '{tool_mode}' mode, despite MCP being enabled."
                     )
 
-            if self._use_mcpp and tool_mode == "Claude":
+            if tool_mode == "Claude":
                 logger.debug(
                     f"Starting Claude tool interaction loop with {len(tools)} tools."
                 )
@@ -632,7 +677,7 @@ class BasicMemoryAgent(AgentInterface):
                 ):
                     yield output
                 return
-            elif self._use_mcpp and tool_mode == "OpenAI":
+            elif tool_mode == "OpenAI":
                 logger.debug(
                     f"Starting OpenAI tool interaction loop with {len(tools)} tools."
                 )

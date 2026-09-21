@@ -1,5 +1,7 @@
 import json
 import datetime
+import asyncio
+from pathlib import Path
 from loguru import logger
 from typing import (
     Dict,
@@ -13,6 +15,9 @@ from typing import (
 from .types import ToolCallObject
 from .mcp_client import MCPClient
 from .tool_manager import ToolManager
+from ..artifacts.tools import ARTIFACT_TOOL_NAMES, ArtifactToolService
+from ..artifacts.generation import ArtifactGenerationManager, GenerationLimits
+from ..artifacts.generators import generate_docx, generate_xlsx, generate_pdf, generate_pptx, extension_for
 
 
 class ToolExecutor:
@@ -21,13 +26,34 @@ class ToolExecutor:
         mcp_client: MCPClient,
         tool_manager: ToolManager,
         allowed_tools: list[str] | None = None,
+        artifact_service: ArtifactToolService | None = None,
+        artifact_allowed_tools: list[str] | None = None,
+        artifact_generation_max_concurrent_jobs: int = 2,
+        artifact_generation_max_job_seconds: float = 60.0,
     ):
         self._mcp_client = mcp_client
         self._tool_manager = tool_manager
         # Security boundary: only explicitly allowlisted tools may execute.
         self._allowed_tools = set(allowed_tools or [])
+        self._artifact_service = artifact_service
+        self._artifact_allowed_tools = set(artifact_allowed_tools or [])
+        self._artifact_generation = ArtifactGenerationManager(
+            GenerationLimits(
+                max_concurrent_jobs=artifact_generation_max_concurrent_jobs,
+                max_job_seconds=artifact_generation_max_job_seconds,
+            )
+        )
         logger.info(
             f"ToolExecutor allowlist contains {len(self._allowed_tools)} tool(s)."
+        )
+
+    def configure_artifact_generation(self, *, max_concurrent_jobs: int, max_job_seconds: float) -> None:
+        """Replace artifact generation limits for an already-created executor."""
+        self._artifact_generation = ArtifactGenerationManager(
+            GenerationLimits(
+                max_concurrent_jobs=max_concurrent_jobs,
+                max_job_seconds=max_job_seconds,
+            )
         )
 
     def parse_tool_call(self, call: Union[Dict[str, Any], ToolCallObject]) -> tuple:
@@ -282,6 +308,8 @@ class ToolExecutor:
                 "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat()
                 + "Z",
             }
+            if metadata.get("artifacts"):
+                status_update["artifacts"] = metadata["artifacts"]
 
             # For stagehand_navigate tool, include browser view links if available
             if tool_name == "stagehand_navigate" and not is_error:
@@ -315,7 +343,184 @@ class ToolExecutor:
             tuple: (is_error, text_content, metadata, content_items)
         """
         logger.info(f"Executing tool: {tool_name} (ID: {tool_id})")
-        tool_info = self._tool_manager.get_tool(tool_name)
+        metadata: Dict[str, Any] = {}
+        content_items: List[Dict[str, Any]] = []
+        # Internal artifact tools are intentionally handled outside MCP but remain
+        # behind their own explicit allowlist.
+        if tool_name in ARTIFACT_TOOL_NAMES:
+            if tool_name not in self._artifact_allowed_tools:
+                text_content = (
+                    f"Artifact tool '{tool_name}' is not permitted to execute. "
+                    "Add it to artifact_allowed_tools if this tool is trusted."
+                )
+                return True, text_content, metadata, [{"type": "error", "text": text_content}]
+            try:
+                if self._artifact_service is None:
+                    raise RuntimeError("Artifact generation is not configured")
+                if not isinstance(tool_input, dict):
+                    raise ValueError("Artifact tool input must be an object")
+                if tool_name == "artifact_create_file":
+                    filename = str(tool_input.get("filename", "")).strip()
+                    content = tool_input.get("content", "")
+                    suffix = Path(filename).suffix.lower()
+                    # Safety net for models that select artifact_create_file for a
+                    # binary document extension. Route to the real generator instead
+                    # of creating a text file with a misleading extension.
+                    if suffix == ".docx":
+                        data = await self._artifact_generation.run(
+                            generate_docx,
+                            title=Path(filename).stem,
+                            paragraphs=str(content).splitlines() or [""],
+                        )
+                        artifact = self._artifact_service.create_generated_file(
+                            filename, data, "document", "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                        )
+                    elif suffix == ".pdf":
+                        data = await self._artifact_generation.run(
+                            generate_pdf,
+                            title=Path(filename).stem,
+                            paragraphs=str(content).splitlines() or [""],
+                        )
+                        artifact = self._artifact_service.create_generated_file(
+                            filename, data, "document", "application/pdf"
+                        )
+                    elif suffix == ".pptx":
+                        lines = str(content).splitlines() or [""]
+                        data = await self._artifact_generation.run(
+                            generate_pptx,
+                            title=Path(filename).stem,
+                            slides=[{"title": Path(filename).stem, "bullets": lines}],
+                        )
+                        artifact = self._artifact_service.create_generated_file(
+                            filename, data, "presentation", "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+                        )
+                    elif suffix == ".xlsx":
+                        rows = [line.split("\t") if "\t" in line else line.split(",") for line in str(content).splitlines() if line.strip()]
+                        data = await self._artifact_generation.run(
+                            generate_xlsx,
+                            sheets=[{"name": "Sheet1", "rows": rows or [[str(content)]]}],
+                        )
+                        artifact = self._artifact_service.create_generated_file(
+                            filename, data, "spreadsheet", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                        )
+                    else:
+                        artifact = self._artifact_service.create_file(
+                            filename,
+                            content,
+                            tool_input.get("artifact_type"),
+                        )
+                    metadata["artifacts"] = [artifact]
+                    text_content = json.dumps({"artifact": artifact, "operation": "created"}, ensure_ascii=False)
+                elif tool_name == "artifact_create_project":
+                    artifacts = self._artifact_service.create_project(
+                        tool_input.get("project_name", ""),
+                        tool_input.get("files", []),
+                    )
+                    metadata["artifacts"] = artifacts
+                    text_content = json.dumps({"artifacts": artifacts}, ensure_ascii=False)
+                elif tool_name == "artifact_edit_file":
+                    artifact = self._artifact_service.edit_file(
+                        tool_input.get("artifact_id", ""),
+                        tool_input.get("content", ""),
+                    )
+                    metadata["artifacts"] = [artifact]
+                    metadata["artifact_operation"] = "updated"
+                    text_content = json.dumps({"artifact": artifact, "operation": "updated"}, ensure_ascii=False)
+                elif tool_name == "artifact_list":
+                    artifacts = self._artifact_service.list_artifacts()
+                    metadata["artifacts"] = artifacts
+                    metadata["artifact_operation"] = "listed"
+                    text_content = json.dumps({"artifacts": artifacts}, ensure_ascii=False)
+                elif tool_name == "artifact_create_document":
+                    filename = tool_input.get("filename", "")
+                    expected, mime = extension_for("docx")
+                    if not str(filename).lower().endswith(expected):
+                        filename = f"{filename}{expected}"
+                    data = await self._artifact_generation.run(
+                        generate_docx,
+                        title=tool_input.get("title", ""),
+                        paragraphs=tool_input.get("paragraphs", []),
+                    )
+                    artifact = self._artifact_service.create_generated_file(
+                        filename, data, "document", mime
+                    )
+                    metadata["artifacts"] = [artifact]
+                    text_content = json.dumps({"artifact": artifact}, ensure_ascii=False)
+                elif tool_name == "artifact_create_spreadsheet":
+                    filename = tool_input.get("filename", "")
+                    expected, mime = extension_for("xlsx")
+                    if not str(filename).lower().endswith(expected):
+                        filename = f"{filename}{expected}"
+                    data = await self._artifact_generation.run(
+                        generate_xlsx,
+                        sheets=tool_input.get("sheets", []),
+                    )
+                    artifact = self._artifact_service.create_generated_file(
+                        filename, data, "spreadsheet", mime
+                    )
+                    metadata["artifacts"] = [artifact]
+                    text_content = json.dumps({"artifact": artifact}, ensure_ascii=False)
+                elif tool_name == "artifact_create_pdf":
+                    filename = tool_input.get("filename", "")
+                    expected, mime = extension_for("pdf")
+                    if not str(filename).lower().endswith(expected):
+                        filename = f"{filename}{expected}"
+                    data = await self._artifact_generation.run(
+                        generate_pdf,
+                        title=tool_input.get("title", ""),
+                        paragraphs=tool_input.get("paragraphs", []),
+                    )
+                    artifact = self._artifact_service.create_generated_file(
+                        filename, data, "document", mime
+                    )
+                    metadata["artifacts"] = [artifact]
+                    text_content = json.dumps({"artifact": artifact}, ensure_ascii=False)
+                elif tool_name == "artifact_convert":
+                    artifact = self._artifact_service.convert_artifact(
+                        tool_input.get("artifact_id", ""),
+                        tool_input.get("target_format", ""),
+                        tool_input.get("filename"),
+                    )
+                    metadata["artifacts"] = [artifact]
+                    metadata["artifact_operation"] = "converted"
+                    text_content = json.dumps({"artifact": artifact, "operation": "converted"}, ensure_ascii=False)
+                elif tool_name == "artifact_create_presentation":
+                    filename = tool_input.get("filename", "")
+                    expected, mime = extension_for("pptx")
+                    if not str(filename).lower().endswith(expected):
+                        filename = f"{filename}{expected}"
+                    data = await self._artifact_generation.run(
+                        generate_pptx,
+                        title=tool_input.get("title", ""),
+                        slides=tool_input.get("slides", []),
+                    )
+                    artifact = self._artifact_service.create_generated_file(
+                        filename, data, "presentation", mime
+                    )
+                    metadata["artifacts"] = [artifact]
+                    text_content = json.dumps({"artifact": artifact}, ensure_ascii=False)
+                else:
+                    raise ValueError(f"Unsupported artifact tool: {tool_name}")
+                content_items = [{"type": "text", "text": text_content}]
+                return False, text_content, metadata, content_items
+            except Exception as e:
+                logger.error(f"Artifact tool '{tool_name}' failed: {e}")
+                if isinstance(e, FileExistsError):
+                    error_code = "ARTIFACT_EXISTS"
+                elif isinstance(e, (PermissionError,)): 
+                    error_code = "ARTIFACT_FORBIDDEN"
+                elif isinstance(e, (ValueError, TypeError)):
+                    message = str(e)
+                    error_code = "FORMAT_REQUIRES_GENERATOR" if message.startswith("FORMAT_REQUIRES_GENERATOR:") else "INVALID_ARTIFACT_REQUEST"
+                elif isinstance(e, KeyError):
+                    error_code = "ARTIFACT_NOT_FOUND"
+                else:
+                    error_code = "ARTIFACT_OPERATION_FAILED"
+                payload = {"success": False, "error_code": error_code, "message": str(e), "tool": tool_name}
+                text = json.dumps(payload, ensure_ascii=False)
+                return True, text, metadata, [{"type": "error", "text": text}]
+
+        tool_info = self._tool_manager.get_tool(tool_name) if self._tool_manager else None
 
         is_error = False
         text_content = ""

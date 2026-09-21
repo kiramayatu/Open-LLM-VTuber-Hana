@@ -34,6 +34,23 @@ class BasicMemoryAgentConfig(I18nMixin, BaseModel):
     use_mcpp: Optional[bool] = Field(False, alias="use_mcpp")
     mcp_enabled_servers: Optional[List[str]] = Field([], alias="mcp_enabled_servers")
     mcp_allowed_tools: Optional[List[str]] = Field([], alias="mcp_allowed_tools")
+    artifact_generation_enabled: bool = Field(True, alias="artifact_generation_enabled")
+    artifact_allowed_tools: List[str] = Field(
+        [
+            "artifact_create_file",
+            "artifact_create_project",
+            "artifact_edit_file",
+            "artifact_list",
+            "artifact_create_document",
+            "artifact_create_spreadsheet",
+            "artifact_create_pdf",
+            "artifact_create_presentation",
+            "artifact_convert",
+        ],
+        alias="artifact_allowed_tools",
+    )
+    artifact_generation_max_concurrent_jobs: int = Field(2, alias="artifact_generation_max_concurrent_jobs")
+    artifact_generation_max_job_seconds: float = Field(60.0, alias="artifact_generation_max_job_seconds")
 
     DESCRIPTIONS: ClassVar[Dict[str, Description]] = {
         "llm_provider": Description(
@@ -59,6 +76,22 @@ class BasicMemoryAgentConfig(I18nMixin, BaseModel):
         "mcp_allowed_tools": Description(
             en="Explicit allowlist of MCP tool names permitted to execute. Empty means no MCP tools may execute.",
             zh="明确允许执行的 MCP 工具名称列表。为空表示不允许执行任何 MCP 工具。",
+        ),
+        "artifact_generation_enabled": Description(
+            en="Allow the agent to create new files/projects inside its isolated artifact workspace.",
+            zh="允许智能体在隔离的 artifact 工作区中创建新文件/项目。",
+        ),
+        "artifact_allowed_tools": Description(
+            en="Explicit allowlist for internal artifact tools. Empty means no artifact tools may execute.",
+            zh="内部 artifact 工具的明确允许列表。为空表示不允许执行任何 artifact 工具。",
+        ),
+        "artifact_generation_max_concurrent_jobs": Description(
+            en="Maximum concurrent document-generation jobs (default: 2).",
+            zh="文档生成任务的最大并发数（默认：2）。",
+        ),
+        "artifact_generation_max_job_seconds": Description(
+            en="Soft time budget for one document-generation job (default: 60 seconds).",
+            zh="单个文档生成任务的软时间限制（默认：60 秒）。",
         ),
     }
 

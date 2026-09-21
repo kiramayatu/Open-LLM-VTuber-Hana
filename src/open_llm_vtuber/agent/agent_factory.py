@@ -83,6 +83,19 @@ class AgentFactory:
                 tool_manager=tool_manager,
                 tool_executor=tool_executor,
                 mcp_prompt_string=mcp_prompt_string,
+                artifact_generation_enabled=basic_memory_settings.get("artifact_generation_enabled", True),
+                artifact_allowed_tools=basic_memory_settings.get(
+                    "artifact_allowed_tools",
+                    ["artifact_create_file", "artifact_create_project", "artifact_edit_file", "artifact_list", "artifact_create_document", "artifact_create_spreadsheet", "artifact_create_pdf", "artifact_create_presentation", "artifact_convert"],
+                ),
+                artifact_generation_max_concurrent_jobs=basic_memory_settings.get(
+                    "artifact_generation_max_concurrent_jobs", 2
+                ),
+                artifact_generation_max_job_seconds=basic_memory_settings.get(
+                    "artifact_generation_max_job_seconds", 60.0
+                ),
+                artifact_workspace_root=kwargs.get("artifact_workspace_root", "generated_files"),
+                artifact_workspace_conversation_id=kwargs.get("artifact_workspace_conversation_id"),
             )
 
         elif conversation_agent_choice == "mem0_agent":
