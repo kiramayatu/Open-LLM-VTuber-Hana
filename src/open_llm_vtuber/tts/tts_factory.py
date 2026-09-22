@@ -1,6 +1,7 @@
 from typing import Type
 from .tts_interface import TTSInterface
 from .gradio_vits_tts import GradioVITSTTS
+from .hana_tts import HanaTTSTTS
 
 
 class TTSFactory:
@@ -75,6 +76,14 @@ class TTSFactory:
                 language=kwargs.get("language", "日本語"),
                 speed=kwargs.get("speed", 1.0),
         )
+        elif engine_type == "hana_tts":
+            return HanaTTSTTS(
+                api_url=kwargs.get("api_url", "http://127.0.0.1:7860/v1/tts"),
+                speaker=kwargs.get("speaker", "Hana"),
+                language=kwargs.get("language", "日本語"),
+                speed=kwargs.get("speed", 1.0),
+                timeout=kwargs.get("timeout", 120.0),
+            )
         elif engine_type == "x_tts":
             from .x_tts import TTSEngine as XTTSEngine
 

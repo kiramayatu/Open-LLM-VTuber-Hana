@@ -373,6 +373,27 @@ class GradioVITSTTSConfig(I18nMixin):
     }
 
 
+class HanaTTSTTSConfig(I18nMixin):
+    """Configuration for the modern standalone Hana VITS FastAPI service."""
+
+    api_url: str = Field("http://127.0.0.1:7860/v1/tts", alias="api_url")
+    speaker: str = Field("Hana", alias="speaker")
+    language: str = Field("日本語", alias="language")
+    speed: float = Field(1.0, alias="speed")
+    timeout: float = Field(120.0, alias="timeout")
+
+    DESCRIPTIONS: ClassVar[Dict[str, Description]] = {
+        "api_url": Description(
+            en="Hana FastAPI TTS endpoint URL (POST /v1/tts)",
+            zh="Hana FastAPI TTS 端点 URL（POST /v1/tts）",
+        ),
+        "speaker": Description(en="Hana speaker name", zh="Hana 说话人名称"),
+        "language": Description(en="Language passed to Hana TTS", zh="传递给 Hana TTS 的语言"),
+        "speed": Description(en="Speech speed multiplier", zh="语速倍数"),
+        "timeout": Description(en="HTTP request timeout in seconds", zh="HTTP 请求超时时间（秒）"),
+    }
+
+
 
 class SherpaOnnxTTSConfig(I18nMixin):
     """Configuration for Sherpa Onnx TTS."""
@@ -718,6 +739,7 @@ class TTSConfig(I18nMixin):
         "cartesia_tts",
         "piper_tts",
         "gradio_vits",
+        "hana_tts",
     ] = Field(..., alias="tts_model")
 
     gradio_vits: Optional[GradioVITSTTSConfig] = Field(None, alias="gradio_vits")
@@ -743,6 +765,7 @@ class TTSConfig(I18nMixin):
     elevenlabs_tts: ElevenLabsTTSConfig | None = Field(None, alias="elevenlabs_tts")
     cartesia_tts: CartesiaTTSConfig | None = Field(None, alias="cartesia_tts")
     piper_tts: Optional[PiperTTSConfig] = Field(None, alias="piper_tts")
+    hana_tts: Optional[HanaTTSTTSConfig] = Field(None, alias="hana_tts")
 
     DESCRIPTIONS: ClassVar[Dict[str, Description]] = {
         "tts_model": Description(
@@ -786,6 +809,10 @@ class TTSConfig(I18nMixin):
             en="Configuration for Cartesia TTS", zh="Cartesia TTS 配置"
         ),
         "piper_tts": Description(en="Configuration for Piper TTS", zh="Piper TTS 配置"),
+        "hana_tts": Description(
+            en="Configuration for the standalone Hana VITS FastAPI service",
+            zh="独立 Hana VITS FastAPI 服务配置",
+        ),
     }
 
     @model_validator(mode="after")
@@ -831,4 +858,6 @@ class TTSConfig(I18nMixin):
             values.piper_tts.model_validate(values.piper_tts.model_dump())
         elif tts_model == "gradio_vits" and values.gradio_vits is not None:
             values.gradio_vits.model_validate(values.gradio_vits.model_dump())
+        elif tts_model == "hana_tts" and values.hana_tts is not None:
+            values.hana_tts.model_validate(values.hana_tts.model_dump())
         return values
