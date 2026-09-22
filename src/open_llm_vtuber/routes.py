@@ -5,7 +5,7 @@ import secrets
 from uuid import uuid4
 from pathlib import Path
 import numpy as np
-from datetime import datetime
+from datetime import datetime, timezone
 from fastapi import APIRouter, WebSocket, UploadFile, File, Response, Depends, HTTPException, status, Query
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from starlette.responses import JSONResponse, FileResponse
@@ -184,6 +184,22 @@ def _cleanup_temp_file(path: str) -> None:
         pass
 
 
+def _conversation_created_at(conversation_id: str | None) -> str | None:
+    """Best-effort creation time from the app's timestamp-prefixed history UID.
+
+    History IDs are created with the server's local clock and do not include a timezone,
+    so keep the value timezone-naive rather than incorrectly labeling it as UTC.
+    """
+    if not conversation_id or len(conversation_id) < 19:
+        return None
+    raw = conversation_id[:19]
+    try:
+        datetime.strptime(raw, "%Y-%m-%d_%H-%M-%S")
+    except ValueError:
+        return None
+    return raw.replace("_", " ")
+
+
 def _friendly_workspace_name(artifact_manager: ArtifactManager, workspace) -> str:
     artifacts = artifact_manager.list(workspace_id=workspace.workspace_id)
     for artifact in artifacts:
@@ -211,12 +227,11 @@ def init_artifact_download_routes(default_context_cache: ServiceContext) -> APIR
 
     async def verify_api_key(
         auth: HTTPAuthorizationCredentials = Depends(security),
-        query_api_key: str | None = Query(default=None, alias="api_key"),
     ):
         expected = _normalize_api_key(default_context_cache.system_config.api_key)
         if not expected:
             raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Server API key is not configured")
-        provided = _normalize_api_key(auth.credentials if auth else query_api_key)
+        provided = _normalize_api_key(auth.credentials if auth else None)
         if not provided or not secrets.compare_digest(provided, expected):
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or Missing API Key", headers={"WWW-Authenticate": "Bearer"})
         return provided
@@ -250,19 +265,25 @@ def init_artifact_download_routes(default_context_cache: ServiceContext) -> APIR
         workspace_manager, artifact_manager = _artifact_managers()
         try:
             items = []
-            for workspace in workspace_manager.list():
+            workspaces = sorted(
+                workspace_manager.list(),
+                key=lambda w: str(w.created_at or ""),
+                reverse=True,
+            )
+            for workspace in workspaces:
                 display_name = workspace.name
                 if display_name.strip().lower() in {"vtuber artifacts", "untitled project", "general files"}:
                     display_name = _friendly_workspace_name(artifact_manager, workspace)
                     if display_name and display_name != workspace.name:
                         try:
-                            workspace_manager.rename(workspace.workspace_id, display_name)
+                            workspace_manager.rename(workspace.workspace_id, display_name, touch_updated=False)
                         except Exception:
                             pass
                 items.append({
                     "workspace_id": workspace.workspace_id,
                     "name": display_name,
                     "conversation_id": workspace.conversation_id,
+                    "conversation_created_at": _conversation_created_at(workspace.conversation_id),
                     "created_at": workspace.created_at,
                     "updated_at": workspace.updated_at,
                     "size": workspace_manager.size(workspace.workspace_id),
@@ -299,10 +320,18 @@ def init_artifact_download_routes(default_context_cache: ServiceContext) -> APIR
                     "created_at": artifact.created_at if artifact else None,
                     "updated_at": artifact.updated_at if artifact else None,
                 })
+            files.sort(
+                key=lambda f: str(f.get("created_at") or f.get("updated_at") or ""),
+                reverse=True,
+            )
             return {
                 "workspace": {
                     "workspace_id": workspace.workspace_id,
                     "name": workspace.name,
+                    "created_at": workspace.created_at,
+                    "updated_at": workspace.updated_at,
+                    "conversation_id": workspace.conversation_id,
+                    "conversation_created_at": _conversation_created_at(workspace.conversation_id),
                     "size": workspace_manager.size(workspace_id),
                     "file_count": workspace_manager.file_count(workspace_id),
                 },
@@ -314,34 +343,82 @@ def init_artifact_download_routes(default_context_cache: ServiceContext) -> APIR
 
     @router.delete("/artifacts/{artifact_id}", dependencies=[Depends(verify_api_key)])
     async def delete_artifact(artifact_id: str):
-        """Delete one managed artifact and its backing file."""
+        """Delete one managed artifact with rollback-safe file staging."""
         workspace_manager, artifact_manager = _artifact_managers()
+        staged_path: Path | None = None
+        original_path: Path | None = None
         try:
             artifact = artifact_manager.require(artifact_id)
             if artifact.workspace_id is None or not artifact.path:
                 raise HTTPException(status_code=404, detail="Artifact file not found")
-            workspace_manager.delete_file(artifact.workspace_id, artifact.path)
-            artifact_manager.delete(artifact_id)
+            original_path = workspace_manager._resolve_file(artifact.workspace_id, artifact.path)
+            if original_path.is_symlink() or not original_path.exists() or not original_path.is_file():
+                raise HTTPException(status_code=404, detail="Artifact file not found")
+            staged_path = original_path.with_name(f".{original_path.name}.delete-{uuid4().hex}")
+            os.replace(original_path, staged_path)
+            try:
+                artifact_manager.delete(artifact_id)
+            except Exception:
+                os.replace(staged_path, original_path)
+                staged_path = None
+                raise
+            try:
+                staged_path.unlink(missing_ok=True)
+            finally:
+                staged_path = None
             return {"success": True, "artifact_id": artifact_id}
         except KeyError:
             raise HTTPException(status_code=404, detail="Artifact not found")
         finally:
+            if staged_path is not None and original_path is not None:
+                try:
+                    os.replace(staged_path, original_path)
+                except OSError:
+                    pass
             artifact_manager.close()
             workspace_manager.close()
 
     @router.delete("/workspaces/{workspace_id}", dependencies=[Depends(verify_api_key)])
     async def delete_artifact_workspace(workspace_id: str):
-        """Delete one workspace and all managed artifacts associated with it."""
+        """Delete one workspace transactionally with rollback-safe filesystem staging."""
         workspace_manager, artifact_manager = _artifact_managers()
+        staged_root: Path | None = None
+        original_root: Path | None = None
+        artifact_ids: list[str] = []
+        committed = False
         try:
-            workspace_manager.require(workspace_id)
-            for artifact in list(artifact_manager.list(workspace_id=workspace_id)):
-                artifact_manager.delete(artifact.artifact_id)
-            workspace_manager.delete(workspace_id, delete_files=True)
+            workspace = workspace_manager.require(workspace_id)
+            original_root = workspace.root_path
+            staged_root = original_root.with_name(f".{original_root.name}.delete-{uuid4().hex}")
+            os.replace(original_root, staged_root)
+            try:
+                artifact_ids = workspace_manager.delete_workspace_metadata(workspace_id)
+                committed = True
+            except Exception:
+                os.replace(staged_root, original_root)
+                staged_root = None
+                raise
+            # Keep the in-memory artifact cache consistent with the committed DB transaction.
+            for artifact_id in artifact_ids:
+                artifact_manager._artifacts.pop(artifact_id, None)
+            import shutil
+            # Cleanup is best-effort after the durable DB transaction commits. If the OS refuses
+            # deletion, leave the staged trash directory outside managed workspace metadata; never
+            # recreate a workspace that has already been committed as deleted.
+            try:
+                shutil.rmtree(staged_root, ignore_errors=False)
+            except OSError:
+                logger.warning(f"Deferred cleanup needed for deleted workspace temp directory: {staged_root}")
+            staged_root = None
             return {"success": True, "workspace_id": workspace_id}
         except KeyError:
             raise HTTPException(status_code=404, detail="Workspace not found")
         finally:
+            if staged_root is not None and original_root is not None and not committed:
+                try:
+                    os.replace(staged_root, original_root)
+                except OSError:
+                    pass
             artifact_manager.close()
             workspace_manager.close()
 
@@ -372,7 +449,23 @@ def init_artifact_download_routes(default_context_cache: ServiceContext) -> APIR
                         src = workspace_manager._resolve_file(workspace_id, rel)
                         if src.is_symlink() or not src.is_file():
                             raise HTTPException(status_code=404, detail="Workspace contains an invalid file")
-                        archive.write(src, arcname=rel)
+                        fd = os.open(src, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+                        try:
+                            before = os.fstat(fd)
+                            if before.st_size > MAX_WORKSPACE_ZIP_BYTES:
+                                raise HTTPException(status_code=413, detail="Workspace file exceeds the ZIP export limit")
+                            info = zipfile.ZipInfo(rel)
+                            info.compress_type = zipfile.ZIP_DEFLATED
+                            with os.fdopen(fd, "rb", closefd=True) as source, archive.open(info, "w") as target:
+                                fd = -1
+                                import shutil
+                                shutil.copyfileobj(source, target, length=1024 * 1024)
+                                after = os.fstat(source.fileno())
+                            if after.st_size != before.st_size:
+                                raise HTTPException(status_code=409, detail=f"File changed during ZIP export: {rel}")
+                        finally:
+                            if fd != -1:
+                                os.close(fd)
             except Exception:
                 _cleanup_temp_file(temp_name)
                 raise

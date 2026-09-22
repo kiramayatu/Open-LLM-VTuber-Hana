@@ -234,14 +234,15 @@ class WorkspaceManager:
     def get(self, workspace_id: str) -> Workspace | None:
         return self._workspaces.get(workspace_id)
 
-    def rename(self, workspace_id: str, name: str) -> Workspace:
+    def rename(self, workspace_id: str, name: str, *, touch_updated: bool = True) -> Workspace:
         """Update the human-readable workspace name without changing its stable ID."""
         name = str(name).strip()
         if not name:
             raise ValueError("Workspace name cannot be empty")
         workspace = self.require(workspace_id)
         workspace.name = name
-        workspace.updated_at = self._utc_now_iso()
+        if touch_updated:
+            workspace.updated_at = self._utc_now_iso()
         self._persist_workspace(workspace)
         return workspace
 
@@ -276,6 +277,28 @@ class WorkspaceManager:
         self._conn.commit()
         self._workspaces.pop(workspace_id, None)
         return True
+
+    def delete_workspace_metadata(self, workspace_id: str) -> list[str]:
+        """Atomically remove a workspace row and its artifact metadata.
+
+        Filesystem deletion is staged by the caller before this transaction.
+        Returns the deleted artifact IDs so in-memory caches can be updated.
+        """
+        workspace = self.require(workspace_id)
+        rows = self._conn.execute(
+            "SELECT artifact_id FROM artifacts WHERE workspace_id = ?", (workspace_id,)
+        ).fetchall()
+        artifact_ids = [str(row[0]) for row in rows]
+        try:
+            self._conn.execute("BEGIN IMMEDIATE")
+            self._conn.execute("DELETE FROM artifacts WHERE workspace_id = ?", (workspace_id,))
+            self._conn.execute("DELETE FROM workspaces WHERE workspace_id = ?", (workspace_id,))
+            self._conn.commit()
+        except Exception:
+            self._conn.rollback()
+            raise
+        self._workspaces.pop(workspace_id, None)
+        return artifact_ids
 
     def size(self, workspace_id: str) -> int:
         root = self.require(workspace_id).root_path
