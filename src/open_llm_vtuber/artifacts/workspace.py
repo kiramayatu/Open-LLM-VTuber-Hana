@@ -234,6 +234,17 @@ class WorkspaceManager:
     def get(self, workspace_id: str) -> Workspace | None:
         return self._workspaces.get(workspace_id)
 
+    def rename(self, workspace_id: str, name: str) -> Workspace:
+        """Update the human-readable workspace name without changing its stable ID."""
+        name = str(name).strip()
+        if not name:
+            raise ValueError("Workspace name cannot be empty")
+        workspace = self.require(workspace_id)
+        workspace.name = name
+        workspace.updated_at = self._utc_now_iso()
+        self._persist_workspace(workspace)
+        return workspace
+
     def get_by_conversation_id(self, conversation_id: str) -> Workspace | None:
         if not conversation_id:
             return None

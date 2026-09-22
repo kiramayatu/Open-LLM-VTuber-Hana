@@ -36,6 +36,10 @@ CREATE_ARTIFACT_TOOL = {
                     "enum": ["file", "document", "spreadsheet", "presentation", "image", "project"],
                     "description": "High-level artifact category; normally use file for code/text files.",
                 },
+                "workspace_name": {
+                    "type": "string",
+                    "description": "Optional human-readable project/workspace name. Use a concise name based on the task, e.g. Login Website or Short Story.",
+                },
             },
             "required": ["filename", "content"],
             "additionalProperties": False,
@@ -271,6 +275,66 @@ for _tool in (CREATE_DOCX_TOOL, CREATE_XLSX_TOOL, CREATE_PDF_TOOL, CREATE_PPTX_T
     })
 
 
+GENERIC_WORKSPACE_NAMES = {"vtuber artifacts", "untitled project", "general files"}
+
+
+def _normalize_workspace_name(value: str | None) -> str | None:
+    if not isinstance(value, str):
+        return None
+    cleaned = " ".join(value.replace("/", " ").replace("\\", " ").split())
+    cleaned = "".join(ch for ch in cleaned if ord(ch) >= 32 and ord(ch) != 127)
+    cleaned = cleaned.strip(" .")
+    if not cleaned:
+        return None
+    return cleaned[:60]
+
+
+def _looks_generic_workspace_name(value: str | None) -> bool:
+    if not value:
+        return True
+    return value.strip().lower() in GENERIC_WORKSPACE_NAMES
+
+
+def _workspace_name_from_filename(filename: str) -> str:
+    name = Path(filename).stem.replace("_", " ").replace("-", " ").strip()
+    ext = Path(filename).suffix.lower()
+    special = {
+        "index.html": "Web Project",
+        "package.json": "JavaScript Project",
+        "main.py": "Python Project",
+        "requirements.txt": "Python Project",
+    }
+    if Path(filename).name.lower() in special:
+        return special[Path(filename).name.lower()]
+    if ext in {".html", ".css", ".js", ".ts"} and name.lower() in {"index", "app", "main", "script", "style"}:
+        return "Web Project"
+    if not name or name.lower() in {"sample", "file", "document", "untitled"}:
+        return "General Files"
+    return name.title()[:60]
+
+
+def _workspace_name_from_artifacts(artifact_manager: ArtifactManager | None, workspace_id: str) -> str:
+    if not artifact_manager:
+        return "General Files"
+    artifacts = artifact_manager.list(workspace_id=workspace_id)
+    for artifact in artifacts:
+        project_name = _normalize_workspace_name((artifact.metadata or {}).get("project_name") if isinstance(artifact.metadata, dict) else None)
+        if project_name:
+            return project_name
+    if len(artifacts) == 1:
+        return _workspace_name_from_filename(artifacts[0].name)
+    exts = {Path(a.name).suffix.lower() for a in artifacts}
+    if ".html" in exts or ".css" in exts or ".js" in exts:
+        return "Web Project"
+    if ".xlsx" in exts or ".csv" in exts:
+        return "Spreadsheet"
+    if ".docx" in exts or ".pdf" in exts:
+        return "Documents"
+    if ".pptx" in exts:
+        return "Presentation"
+    return "File Collection" if artifacts else "General Files"
+
+
 def _artifact_type(value: str | None) -> ArtifactType:
     if not value:
         return ArtifactType.FILE
@@ -295,20 +359,29 @@ class ArtifactToolService:
         self.workspace_id = workspace_id
         self.conversation_id = conversation_id
 
-    def _ensure_workspace(self) -> str:
+    def _ensure_workspace(self, name_hint: str | None = None) -> str:
+        requested = _normalize_workspace_name(name_hint)
         if self.workspace_id:
+            existing = self.workspace_manager.require(self.workspace_id)
+            if requested and _looks_generic_workspace_name(existing.name):
+                self.workspace_manager.rename(existing.workspace_id, requested)
             return self.workspace_id
         if self.conversation_id:
             existing = self.workspace_manager.get_by_conversation_id(self.conversation_id)
             if existing:
                 self.workspace_id = existing.workspace_id
+                if requested and _looks_generic_workspace_name(existing.name):
+                    self.workspace_manager.rename(existing.workspace_id, requested)
                 return self.workspace_id
-        workspace = self.workspace_manager.create(name="VTuber Artifacts", conversation_id=self.conversation_id)
+        workspace = self.workspace_manager.create(
+            name=requested or "General Files",
+            conversation_id=self.conversation_id,
+        )
         self.workspace_id = workspace.workspace_id
         return self.workspace_id
 
-    def create_file(self, filename: str, content: str, artifact_type: str | None = None) -> dict[str, Any]:
-        workspace_id = self._ensure_workspace()
+    def create_file(self, filename: str, content: str, artifact_type: str | None = None, workspace_name: str | None = None) -> dict[str, Any]:
+        workspace_id = self._ensure_workspace(workspace_name or _workspace_name_from_filename(filename))
         if not isinstance(filename, str) or not filename.strip():
             raise ValueError("filename must be a non-empty string")
         if not isinstance(content, str):
@@ -397,24 +470,28 @@ class ArtifactToolService:
         expected, mime = extension_for("docx")
         if not filename.lower().endswith(expected):
             filename = f"{filename}{expected}"
+        self._ensure_workspace(Path(filename).stem or title)
         return self._create_generated_file(filename, generate_docx(title=title, paragraphs=paragraphs), ArtifactType.DOCUMENT, mime)
 
     def create_spreadsheet(self, filename: str, sheets: list[dict[str, Any]]) -> dict[str, Any]:
         expected, mime = extension_for("xlsx")
         if not filename.lower().endswith(expected):
             filename = f"{filename}{expected}"
+        self._ensure_workspace(Path(filename).stem or "Spreadsheet")
         return self._create_generated_file(filename, generate_xlsx(sheets=sheets), ArtifactType.SPREADSHEET, mime)
 
     def create_pdf(self, filename: str, title: str, paragraphs: list[str]) -> dict[str, Any]:
         expected, mime = extension_for("pdf")
         if not filename.lower().endswith(expected):
             filename = f"{filename}{expected}"
+        self._ensure_workspace(Path(filename).stem or title)
         return self._create_generated_file(filename, generate_pdf(title=title, paragraphs=paragraphs), ArtifactType.DOCUMENT, mime)
 
     def create_presentation(self, filename: str, title: str, slides: list[dict[str, Any]]) -> dict[str, Any]:
         expected, mime = extension_for("pptx")
         if not filename.lower().endswith(expected):
             filename = f"{filename}{expected}"
+        self._ensure_workspace(Path(filename).stem or title)
         return self._create_generated_file(filename, generate_pptx(title=title, slides=slides), ArtifactType.PRESENTATION, mime)
 
     def convert_artifact(self, artifact_id: str, target_format: str, filename: str | None = None) -> dict[str, Any]:
@@ -490,7 +567,7 @@ class ArtifactToolService:
         return [artifact.to_dict() for artifact in self.artifact_manager.list(workspace_id=workspace_id)]
 
     def create_project(self, project_name: str, files: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        workspace_id = self._ensure_workspace()
+        workspace_id = self._ensure_workspace(project_name)
         if not isinstance(project_name, str) or not project_name.strip():
             raise ValueError("project_name must be a non-empty string")
         if not isinstance(files, list) or not files:

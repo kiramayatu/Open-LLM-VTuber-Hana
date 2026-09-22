@@ -184,6 +184,28 @@ def _cleanup_temp_file(path: str) -> None:
         pass
 
 
+def _friendly_workspace_name(artifact_manager: ArtifactManager, workspace) -> str:
+    artifacts = artifact_manager.list(workspace_id=workspace.workspace_id)
+    for artifact in artifacts:
+        metadata = artifact.metadata if isinstance(artifact.metadata, dict) else {}
+        project_name = metadata.get("project_name")
+        if isinstance(project_name, str) and project_name.strip():
+            return " ".join(project_name.strip().split())[:60]
+    if len(artifacts) == 1:
+        stem = Path(artifacts[0].name).stem.replace("_", " ").replace("-", " ").strip()
+        return (stem[:1].upper() + stem[1:])[:60] if stem else "General Files"
+    exts = {Path(a.name).suffix.lower() for a in artifacts}
+    if {".html", ".css", ".js"} & exts:
+        return "Web Project"
+    if {".xlsx", ".csv"} & exts:
+        return "Spreadsheet"
+    if {".docx", ".pdf"} & exts:
+        return "Documents"
+    if ".pptx" in exts:
+        return "Presentation"
+    return "File Collection" if artifacts else "General Files"
+
+
 def init_artifact_download_routes(default_context_cache: ServiceContext) -> APIRouter:
     router = APIRouter()
 
@@ -229,9 +251,17 @@ def init_artifact_download_routes(default_context_cache: ServiceContext) -> APIR
         try:
             items = []
             for workspace in workspace_manager.list():
+                display_name = workspace.name
+                if display_name.strip().lower() in {"vtuber artifacts", "untitled project", "general files"}:
+                    display_name = _friendly_workspace_name(artifact_manager, workspace)
+                    if display_name and display_name != workspace.name:
+                        try:
+                            workspace_manager.rename(workspace.workspace_id, display_name)
+                        except Exception:
+                            pass
                 items.append({
                     "workspace_id": workspace.workspace_id,
-                    "name": workspace.name,
+                    "name": display_name,
                     "conversation_id": workspace.conversation_id,
                     "created_at": workspace.created_at,
                     "updated_at": workspace.updated_at,
