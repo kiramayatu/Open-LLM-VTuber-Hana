@@ -8,6 +8,7 @@ user-facing eye/reveal action.
 from __future__ import annotations
 
 import json
+import re
 import secrets as _secrets
 from typing import Any
 from uuid import uuid4
@@ -15,6 +16,7 @@ from uuid import uuid4
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from loguru import logger
+import yaml
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, ValidationError, field_validator
 
 from .config_manager.llm_provider import (
@@ -29,12 +31,14 @@ from .config_manager.llm_provider_connection import (
     LLMProviderConnectionManager,
     LLMModelInfo,
 )
+from .config_manager.agent import AgentConfig
 from .config_manager.llm_provider_runtime import import_legacy_provider
 
 
 security = HTTPBearer(auto_error=False)
 MAX_PROVIDER_SETTINGS_BYTES = 32 * 1024
 MAX_PROVIDERS_PER_RESPONSE = 256
+MAX_IMPORTED_YAML_BYTES = 512 * 1024
 
 
 class LLMProviderUpdate(BaseModel):
@@ -116,6 +120,31 @@ class LLMProviderImportRequest(BaseModel):
 
     provider_name: str | None = Field(default=None, max_length=120)
     activate: bool = False
+
+    @field_validator("provider_name")
+    @classmethod
+    def normalize_provider_name(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        value = value.strip()
+        return value or None
+
+
+class LLMProviderYamlFileImportRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    filename: str = Field(min_length=1, max_length=255)
+    content: str = Field(min_length=1, max_length=MAX_IMPORTED_YAML_BYTES)
+    provider_name: str | None = Field(default=None, max_length=120)
+    activate: bool = False
+
+    @field_validator("filename")
+    @classmethod
+    def normalize_filename(cls, value: str) -> str:
+        value = value.strip()
+        if not value or value in {".", ".."} or "/" in value or "\\" in value:
+            raise ValueError("filename must be a simple file name")
+        return value
 
     @field_validator("provider_name")
     @classmethod
@@ -397,6 +426,34 @@ def init_llm_provider_routes(default_context_cache) -> APIRouter:
             headers={"Cache-Control": "no-store"},
         )
 
+    @router.get("/models/{provider_id}", dependencies=[Depends(verify_api_key)])
+    async def discover_saved_provider_models(provider_id: str) -> Response:
+        """Fallback discovery route for saved providers.
+
+        Some reverse proxies or stale deployments can reject the JSON POST model
+        discovery route with HTTP 405. Saved providers can safely use this GET
+        route because the credential remains entirely server-side.
+        """
+        with open_store() as store:
+            try:
+                provider = store.require(provider_id)
+            except KeyError as exc:
+                raise HTTPException(status_code=404, detail="LLM provider not found") from exc
+        try:
+            models = await LLMProviderConnectionManager().discover_models(provider)
+        except Exception as exc:
+            return Response(
+                content=json.dumps({"error": _safe_connection_error(exc)}, ensure_ascii=False),
+                media_type="application/json",
+                status_code=502,
+                headers={"Cache-Control": "no-store"},
+            )
+        return Response(
+            content=json.dumps({"models": _serialized_models(models)}, ensure_ascii=False),
+            media_type="application/json",
+            headers={"Cache-Control": "no-store"},
+        )
+
     @router.post("/models", dependencies=[Depends(verify_api_key)])
     async def discover_unsaved_or_draft_models(request: Request) -> Response:
         payload = await _validated_body(request, LLMProviderProbeRequest)
@@ -447,6 +504,66 @@ def init_llm_provider_routes(default_context_cache) -> APIRouter:
                 "X-Content-Type-Options": "nosniff",
             },
         )
+
+    @router.post("/import-file", dependencies=[Depends(verify_api_key)])
+    async def import_provider_from_yaml_file(request: Request) -> dict[str, Any]:
+        """Import one LLM provider from a user-selected YAML configuration file.
+
+        The browser sends the file contents as JSON text instead of multipart data,
+        keeping the endpoint simple and avoiding any server-side file persistence.
+        Only the character agent configuration is parsed and converted to a managed
+        provider; unrelated YAML sections are ignored.
+        """
+        payload = await _validated_body(request, LLMProviderYamlFileImportRequest)
+        filename = payload.filename.strip()
+        if not re.search(r"\.(?:ya?ml)$", filename, re.IGNORECASE):
+            raise HTTPException(status_code=422, detail="Only .yaml or .yml files can be imported")
+        encoded_size = len(payload.content.encode("utf-8"))
+        if encoded_size > MAX_IMPORTED_YAML_BYTES:
+            raise HTTPException(
+                status_code=413,
+                detail=f"Configuration file exceeds the {MAX_IMPORTED_YAML_BYTES // 1024} KiB limit",
+            )
+        try:
+            raw = yaml.safe_load(payload.content)
+        except yaml.YAMLError as exc:
+            raise HTTPException(status_code=422, detail="Invalid YAML configuration") from exc
+        if not isinstance(raw, dict):
+            raise HTTPException(status_code=422, detail="YAML configuration must contain an object at the top level")
+
+        character = raw.get("character_config")
+        if not isinstance(character, dict):
+            raise HTTPException(status_code=422, detail="YAML file does not contain character_config")
+        agent_raw = character.get("agent_config")
+        if not isinstance(agent_raw, dict):
+            raise HTTPException(status_code=422, detail="YAML file does not contain character_config.agent_config")
+        try:
+            agent_config = AgentConfig.model_validate(agent_raw)
+        except ValidationError as exc:
+            raise HTTPException(status_code=422, detail="The uploaded agent_config is invalid") from exc
+
+        with open_store() as store:
+            try:
+                provider = import_legacy_provider(
+                    agent_config,
+                    store,
+                    provider_name=payload.provider_name or f"Imported {filename}",
+                    activate=payload.activate,
+                )
+            except (ValueError, ValidationError) as exc:
+                raise HTTPException(status_code=422, detail="Could not import the LLM configuration") from exc
+            if provider is None:
+                raise HTTPException(
+                    status_code=409,
+                    detail="The uploaded YAML LLM configuration cannot be imported into the managed provider system",
+                )
+            runtime_applied = await _refresh_runtime(default_context_cache) if payload.activate else False
+            return {
+                "provider": _public_provider(provider),
+                "active_provider_id": store.get_active_id(),
+                "runtime_applied": runtime_applied,
+                "requires_reconnect": payload.activate,
+            }
 
     @router.post("/import-current", dependencies=[Depends(verify_api_key)])
     async def import_current_provider(request: Request) -> dict[str, Any]:

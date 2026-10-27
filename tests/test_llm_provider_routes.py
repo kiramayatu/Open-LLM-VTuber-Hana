@@ -249,3 +249,54 @@ def test_probe_backend_error_is_generic_and_does_not_echo_secret(tmp_path, monke
     assert response.status_code == 502
     assert "probe-secret" not in response.text
     assert "Could not contact the LLM provider" in response.text
+
+
+def test_import_yaml_file_uploads_and_masks_secret(tmp_path, monkeypatch):
+    import yaml
+    from pathlib import Path
+    from open_llm_vtuber.config_manager.agent import AgentConfig
+
+    app, _context, db = _build_app(tmp_path, monkeypatch)
+    raw = yaml.safe_load((Path(__file__).parents[1] / "conf.yaml").read_text(encoding="utf-8"))
+    agent_config = AgentConfig.model_validate(raw["character_config"]["agent_config"])
+    _context.character_config = SimpleNamespace(agent_config=agent_config)
+    client = TestClient(app)
+    response = client.post(
+        "/llm/providers/import-file",
+        headers=_auth(),
+        json={
+            "filename": "conf.yaml",
+            "content": yaml.safe_dump(raw),
+            "provider_name": "Uploaded Config",
+        },
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()["provider"]
+    assert body["name"] == "Uploaded Config"
+    assert body["api_key_configured"] is True
+    assert "somethingelse" not in response.text
+    with LLMProviderStore(db) as store:
+        assert store.require(body["provider_id"]).secret_value() == "default_api_key"
+
+
+def test_saved_provider_get_model_discovery_fallback(tmp_path, monkeypatch):
+    app, _context, _db = _build_app(tmp_path, monkeypatch)
+    client = TestClient(app)
+    created = client.post(
+        "/llm/providers",
+        headers=_auth(),
+        json={
+            "name": "Ollama",
+            "provider_type": "ollama",
+            "base_url": "http://127.0.0.1:11434",
+            "model": None,
+        },
+    ).json()["provider"]
+
+    async def fake_discover(self, provider):
+        return [provider_routes.LLMModelInfo(model_id="mistral:latest")]
+
+    monkeypatch.setattr(provider_routes.LLMProviderConnectionManager, "discover_models", fake_discover)
+    response = client.get(f"/llm/providers/models/{created['provider_id']}", headers=_auth())
+    assert response.status_code == 200
+    assert response.json()["models"][0]["model_id"] == "mistral:latest"
