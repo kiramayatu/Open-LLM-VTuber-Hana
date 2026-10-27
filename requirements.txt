@@ -6,6 +6,8 @@ azure-cognitiveservices-speech==1.46.0
     # via open-llm-vtuber (pyproject.toml)
 chardet==5.2.0
     # via open-llm-vtuber (pyproject.toml)
+cryptography==46.0.4
+    # via open-llm-vtuber (pyproject.toml)
 duckduckgo-mcp-server==0.1.1
     # via open-llm-vtuber (pyproject.toml)
 edge-tts==7.2.3

@@ -25,6 +25,9 @@ from .vad.vad_factory import VADFactory
 from .agent.agent_factory import AgentFactory
 from .translate.translate_factory import TranslateFactory
 
+from .config_manager.llm_provider import LLMProviderStore
+from .config_manager.llm_provider_runtime import resolve_managed_single_llm, managed_store_path
+
 from .config_manager import (
     Config,
     AgentConfig,
@@ -364,12 +367,20 @@ class ServiceContext:
         else:
             logger.info("VAD already initialized with the same config.")
 
-    async def init_agent(self, agent_config: AgentConfig, persona_prompt: str) -> None:
-        """Initialize or update the LLM engine based on agent configuration."""
+    async def init_agent(
+        self, agent_config: AgentConfig, persona_prompt: str, *, force: bool = False
+    ) -> None:
+        """Initialize or update the LLM engine based on agent configuration.
+
+        ``force=True`` is used by the managed-provider API after a provider/model
+        change so the default context is rebuilt even when the YAML/character
+        configuration itself has not changed.
+        """
         logger.info(f"Initializing Agent: {agent_config.conversation_agent_choice}")
 
         if (
-            self.agent_engine is not None
+            not force
+            and self.agent_engine is not None
             and agent_config == self.character_config.agent_config
             and persona_prompt == self.character_config.persona_prompt
         ):
@@ -382,10 +393,31 @@ class ServiceContext:
         avatar = self.character_config.avatar or ""  # Get avatar from config
 
         try:
+            # Keep the existing YAML configuration as the default. If the user has
+            # explicitly selected a managed provider through the new provider system,
+            # translate it into the exact legacy AgentFactory shape at runtime.
+            agent_settings = agent_config.agent_settings.model_dump()
+            llm_configs = agent_config.llm_configs.model_dump()
+            provider_store = None
+            managed_provider_id = None
+            store_path = managed_store_path()
+            if store_path.exists():
+                provider_store = LLMProviderStore(store_path)
+                try:
+                    agent_settings, llm_configs, managed_provider_id = resolve_managed_single_llm(
+                        agent_config, provider_store
+                    )
+                    if managed_provider_id:
+                        logger.info(
+                            f"Using managed LLM provider: {managed_provider_id}"
+                        )
+                finally:
+                    provider_store.close()
+
             self.agent_engine = AgentFactory.create_agent(
                 conversation_agent_choice=agent_config.conversation_agent_choice,
-                agent_settings=agent_config.agent_settings.model_dump(),
-                llm_configs=agent_config.llm_configs.model_dump(),
+                agent_settings=agent_settings,
+                llm_configs=llm_configs,
                 system_prompt=system_prompt,
                 live2d_model=self.live2d_model,
                 tts_preprocessor_config=self.character_config.tts_preprocessor_config,
@@ -406,6 +438,21 @@ class ServiceContext:
         except Exception as e:
             logger.error(f"Failed to initialize agent: {e}")
             raise
+
+    async def refresh_managed_llm_provider(self) -> bool:
+        """Rebuild the default agent after a managed-provider selection change.
+
+        Existing WebSocket sessions keep their current agent reference; clients
+        should reconnect after this operation to receive the newly selected provider.
+        """
+        if not self.character_config or not self.character_config.agent_config:
+            return False
+        await self.init_agent(
+            self.character_config.agent_config,
+            self.character_config.persona_prompt,
+            force=True,
+        )
+        return True
 
     def init_translate(self, translator_config: TranslatorConfig) -> None:
         """Initialize or update the translation engine based on the configuration."""
