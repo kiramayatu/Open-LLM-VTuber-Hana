@@ -23,7 +23,6 @@ from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator
 from .llm_provider_secrets import (
     LLMProviderSecretError,
     SETTINGS_CIPHERTEXT_PREFIX,
-    SECRET_CIPHERTEXT_PREFIX,
     decrypt_text,
     encrypt_text,
     is_encrypted,

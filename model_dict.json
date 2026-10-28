@@ -25,15 +25,15 @@
             "HitAreaBody": {
                 "": 1
             }
-        }
+        },
+        "format": "cubism3"
     },
-
-    
-    
     {
         "name": "type79",
-        "description": "",
+        "description": "Girls Frontline Type 79",
+        "format": "cubism3",
         "url": "/live2d-models/type79/normal.model3.json",
+        "avatar": "/live2d-models/type79/textures/texture_00.png",
         "kScale": 0.5,
         "initialXshift": 0,
         "initialYshift": 0,
@@ -56,6 +56,105 @@
             "HitAreaBody": {
                 "": 1
             }
+        }
+    },
+    {
+        "name": "shizuku",
+        "description": "Shizuku Live2D Model",
+        "format": "cubism3",
+        "url": "/live2d-models/shizuku/runtime/shizuku.model3.json",
+        "kScale": 0.5,
+        "initialXshift": 0,
+        "initialYshift": 0,
+        "kXOffset": 1150,
+        "idleMotionGroupName": "Idle",
+        "emotionMap": {
+            "neutral": 0,
+            "anger": 2,
+            "disgust": 2,
+            "fear": 1,
+            "joy": 3,
+            "smirk": 3,
+            "sadness": 1,
+            "surprise": 3
+        },
+        "tapMotions": {
+            "HitAreaHead": {
+                "": 1
+            },
+            "HitAreaBody": {
+                "": 1
+            }
+        }
+    },
+    {
+        "name": "shizuku-local",
+        "description": "Shizuku Live2D Model",
+        "format": "cubism3",
+        "url": "/live2d-models/shizuku/runtime/shizuku.model3.json",
+        "kScale": 0.5,
+        "initialXshift": 0,
+        "initialYshift": 0,
+        "kXOffset": 1150,
+        "idleMotionGroupName": "Idle",
+        "emotionMap": {
+            "neutral": 0,
+            "anger": 2,
+            "disgust": 2,
+            "fear": 1,
+            "joy": 3,
+            "smirk": 3,
+            "sadness": 1,
+            "surprise": 3
+        },
+        "tapMotions": {
+            "HitAreaHead": {
+                "": 1
+            },
+            "HitAreaBody": {
+                "": 1
+            }
+        }
+    },
+    {
+        "name": "Image_rxfgotrxfgotrxfg",
+        "description": "PNGTUBER Avatar (Image_rxfgotrxfgotrxfg)",
+        "format": "pngtuber",
+        "url": "/live2d-models/Image_rxfgotrxfgotrxfg/pngtuber.json",
+        "avatar": "/live2d-models/Image_rxfgotrxfgotrxfg/Image_rxfgotrxfgotrxfg.png",
+        "kScale": 0.5,
+        "initialXshift": 0,
+        "initialYshift": 0,
+        "kXOffset": 1150,
+        "idleMotionGroupName": "Idle",
+        "emotionMap": {
+            "neutral": 0,
+            "anger": 2,
+            "disgust": 2,
+            "fear": 1,
+            "joy": 3,
+            "smirk": 3,
+            "sadness": 1,
+            "surprise": 3
+        },
+        "tapMotions": {
+            "HitAreaHead": {
+                "": 1
+            },
+            "HitAreaBody": {
+                "": 1
+            }
+        },
+        "pngtuber": {
+            "name": "Image_rxfgotrxfgotrxfg",
+            "format": "pngtuber",
+            "states": {
+                "closed": "/live2d-models/Image_rxfgotrxfgotrxfg/Image_rxfgotrxfgotrxfg.png",
+                "open": "/live2d-models/Image_rxfgotrxfgotrxfg/Image_rxfgotrxfgotrxfg.png"
+            },
+            "emotions": {},
+            "lipSyncThreshold": 0.08,
+            "bounceIntensity": 6.0
         }
     }
 ]

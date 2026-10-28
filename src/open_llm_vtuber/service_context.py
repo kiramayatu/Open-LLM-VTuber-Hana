@@ -1,4 +1,3 @@
-import os
 import json
 from pathlib import Path
 from typing import Callable
@@ -557,9 +556,14 @@ class ServiceContext:
 
                 alt_config_data = read_yaml(str(file_path)).get("character_config")
 
-                # Start with original config data and perform a deep merge
+                # Start with base conf.yaml character_config so switching from a
+                # previous character preset does not leak its live2d_model_name
+                base_char_data = (
+                    read_yaml("conf.yaml").get("character_config")
+                    or self.config.character_config.model_dump()
+                )
                 new_character_config_data = deep_merge(
-                    self.config.character_config.model_dump(), alt_config_data
+                    base_char_data, alt_config_data
                 )
 
             if new_character_config_data:

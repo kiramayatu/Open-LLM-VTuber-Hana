@@ -6,13 +6,6 @@ from enum import Enum
 import numpy as np
 from loguru import logger
 
-# WebSocket resource limits. These are deliberately conservative to prevent
-# oversized JSON/audio payloads from consuming excessive CPU/RAM per connection.
-MAX_WS_MESSAGE_BYTES = 2 * 1024 * 1024  # 2 MiB total JSON message
-MAX_TEXT_INPUT_LENGTH = 16 * 1024  # 16 KiB user text
-MAX_IMAGES = 8
-MAX_IMAGE_DATA_BYTES = 512 * 1024  # 512 KiB per image payload
-
 from .service_context import ServiceContext
 from .chat_group import (
     ChatGroupManager,
@@ -34,6 +27,13 @@ from .conversations.conversation_handler import (
     handle_group_interrupt,
     handle_individual_interrupt,
 )
+
+# WebSocket resource limits. These are deliberately conservative to prevent
+# oversized JSON/audio payloads from consuming excessive CPU/RAM per connection.
+MAX_WS_MESSAGE_BYTES = 2 * 1024 * 1024  # 2 MiB total JSON message
+MAX_TEXT_INPUT_LENGTH = 16 * 1024  # 16 KiB user text
+MAX_IMAGES = 8
+MAX_IMAGE_DATA_BYTES = 512 * 1024  # 512 KiB per image payload
 
 
 class MessageType(Enum):
@@ -98,6 +98,7 @@ class WebSocketHandler:
             "ai-speak-signal": self._handle_conversation_trigger,
             "fetch-configs": self._handle_fetch_configs,
             "switch-config": self._handle_config_switch,
+            "switch-avatar-model": self._handle_avatar_model_switch,
             "fetch-backgrounds": self._handle_fetch_backgrounds,
             "audio-play-start": self._handle_audio_play_start,
             "request-init-config": self._handle_init_config_request,
@@ -623,6 +624,46 @@ class WebSocketHandler:
         if config_file_name:
             context = self.client_contexts[client_uid]
             await context.handle_config_switch(websocket, config_file_name)
+            if self.default_context_cache and context.live2d_model:
+                self.default_context_cache.live2d_model = context.live2d_model
+                if self.default_context_cache.character_config:
+                    self.default_context_cache.character_config.live2d_model_name = (
+                        context.character_config.live2d_model_name
+                    )
+
+    async def _handle_avatar_model_switch(
+        self, websocket: WebSocket, client_uid: str, data: dict
+    ):
+        """Handle switching the active avatar model for the session and default context."""
+        model_name = (data.get("model_name") or data.get("name") or "").strip()
+        if not model_name:
+            return
+        context = self.client_contexts.get(client_uid) or self.default_context_cache
+        try:
+            context.init_live2d(model_name)
+            if self.default_context_cache and self.default_context_cache is not context:
+                self.default_context_cache.init_live2d(model_name)
+            await websocket.send_text(
+                json.dumps(
+                    {
+                        "type": "set-model-and-conf",
+                        "model_info": context.live2d_model.model_info,
+                        "conf_name": context.character_config.conf_name,
+                        "conf_uid": context.character_config.conf_uid,
+                        "client_uid": client_uid,
+                    }
+                )
+            )
+        except Exception as e:
+            logger.error(f"Error switching avatar model to '{model_name}': {e}")
+            await websocket.send_text(
+                json.dumps(
+                    {
+                        "type": "error",
+                        "message": f"Error switching avatar model: {str(e)}",
+                    }
+                )
+            )
 
     async def _handle_fetch_backgrounds(
         self, websocket: WebSocket, client_uid: str, data: WSMessage

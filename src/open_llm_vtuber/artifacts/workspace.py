@@ -8,7 +8,6 @@ import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 from tempfile import NamedTemporaryFile
-from typing import Any
 from uuid import uuid4
 
 
@@ -266,7 +265,7 @@ class WorkspaceManager:
     def delete(self, workspace_id: str, *, delete_files: bool = True) -> bool:
         workspace = self.require(workspace_id)
         if delete_files:
-            root = self.require(workspace_id).root_path
+            root = workspace.root_path
             for path in sorted(root.rglob("*"), key=lambda p: len(p.parts), reverse=True):
                 if path.is_symlink() or path.is_file():
                     path.unlink(missing_ok=True)
@@ -284,7 +283,7 @@ class WorkspaceManager:
         Filesystem deletion is staged by the caller before this transaction.
         Returns the deleted artifact IDs so in-memory caches can be updated.
         """
-        workspace = self.require(workspace_id)
+        self.require(workspace_id)
         rows = self._conn.execute(
             "SELECT artifact_id FROM artifacts WHERE workspace_id = ?", (workspace_id,)
         ).fetchall()

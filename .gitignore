@@ -79,3 +79,4 @@ mcp_servers.json
 
 .agents/
 graphify-out/
+generated_files/

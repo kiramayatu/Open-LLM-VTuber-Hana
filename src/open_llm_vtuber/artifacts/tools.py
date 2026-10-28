@@ -7,11 +7,11 @@ from __future__ import annotations
 from typing import Any
 from pathlib import Path
 import csv
-from io import StringIO
+from io import BytesIO, StringIO
 from .workspace import WorkspaceManager
 from .manager import ArtifactManager
 from .types import ArtifactType
-from .generators import generate_docx, generate_xlsx, generate_pdf, generate_pptx, extension_for
+from .generators import generate_docx, generate_xlsx, generate_pdf, generate_pptx, extension_for, _safe_excel_value
 
 MAX_PROJECT_FILES = 100
 MAX_PROJECT_PAYLOAD_BYTES = 50 * 1024 * 1024

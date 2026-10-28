@@ -11,7 +11,14 @@ class SystemConfig(I18nMixin):
     host: str = Field(..., alias="host")
     port: int = Field(..., alias="port")
     api_key: str = Field("", alias="api_key")
-    allowed_origins: list[str] = Field(["*"], alias="allowed_origins")
+    allowed_origins: list[str] = Field(
+        default_factory=lambda: [
+            "http://localhost:12393",
+            "http://127.0.0.1:12393",
+            "http://localhost:3000",
+        ],
+        alias="allowed_origins",
+    )
     config_alts_dir: str = Field(..., alias="config_alts_dir")
     tool_prompts: Dict[str, str] = Field(..., alias="tool_prompts")
     enable_proxy: bool = Field(False, alias="enable_proxy")

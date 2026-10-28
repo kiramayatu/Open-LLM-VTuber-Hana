@@ -1,11 +1,13 @@
 import os
+import io
 import json
+import wave
 import asyncio
 import secrets
 from uuid import uuid4
 from pathlib import Path
 import numpy as np
-from datetime import datetime, timezone
+from datetime import datetime
 from fastapi import APIRouter, WebSocket, UploadFile, File, Response, Depends, HTTPException, status, Query
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from starlette.responses import JSONResponse, FileResponse
@@ -114,7 +116,7 @@ def init_client_ws_route(default_context_cache: ServiceContext) -> APIRouter:
                 auth_msg = await asyncio.wait_for(websocket.receive_json(), timeout=5.0)
                 supplied_api_key = _normalize_api_key(auth_msg.get("api_key")) if auth_msg.get("type") == "auth" else None
 
-            if supplied_api_key != expected_api_key:
+            if not supplied_api_key or not secrets.compare_digest(supplied_api_key, expected_api_key):
                 logger.warning("WebSocket authentication failed")
                 await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
                 return
@@ -430,7 +432,7 @@ def init_artifact_download_routes(default_context_cache: ServiceContext) -> APIR
 
         workspace_manager, artifact_manager = _artifact_managers()
         try:
-            workspace = workspace_manager.require(workspace_id)
+            workspace_manager.require(workspace_id)
             files = workspace_manager.list_files(workspace_id)
             if len(files) > MAX_WORKSPACE_ZIP_FILES:
                 raise HTTPException(status_code=413, detail="Workspace contains too many files to export")
@@ -442,7 +444,6 @@ def init_artifact_download_routes(default_context_cache: ServiceContext) -> APIR
             temp_dir.mkdir(parents=True, exist_ok=True)
             fd, temp_name = tempfile.mkstemp(prefix="artifact-", suffix=".zip", dir=temp_dir)
             os.close(fd)
-            root = workspace.root_path
             try:
                 with zipfile.ZipFile(temp_name, "w", compression=zipfile.ZIP_DEFLATED, allowZip64=False) as archive:
                     for rel in files:
@@ -495,13 +496,14 @@ def init_webtool_routes(default_context_cache: ServiceContext) -> APIRouter:
     """
 
     router = APIRouter()
+    tts_connections = 0
 
     # Pass default_context_cache to dependencies
     async def verify_api_key(
         auth: HTTPAuthorizationCredentials = Depends(security),
         query_api_key: str | None = Query(default=None, alias="api_key"),
     ):
-        expected = default_context_cache.system_config.api_key
+        expected = _normalize_api_key(default_context_cache.system_config.api_key)
         if not expected:
             raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Server API key is not configured")
         provided = _normalize_api_key(auth.credentials if auth else query_api_key)
@@ -521,41 +523,67 @@ def init_webtool_routes(default_context_cache: ServiceContext) -> APIRouter:
 
     @router.get("/live2d-models/info", dependencies=[Depends(verify_api_key)])
     async def get_live2d_folder_info():
-        """Get information about available Live2D models"""
+        """Get information about available Live2D and multi-format VTuber models"""
+        from .avatar_manager import load_model_dict, detect_model_format_from_entry, _find_preview_image
+
         live2d_dir = "live2d-models"
-        if not os.path.exists(live2d_dir):
-            return JSONResponse(
-                {"error": "Live2D models directory not found"}, status_code=404
-            )
-
         valid_characters = []
-        supported_extensions = [".png", ".jpg", ".jpeg"]
+        seen_names = set()
 
-        for entry in os.scandir(live2d_dir):
-            if entry.is_dir():
-                folder_name = entry.name.replace("\\", "/")
-                model3_file = os.path.join(
-                    live2d_dir, folder_name, f"{folder_name}.model3.json"
-                ).replace("\\", "/")
+        try:
+            for item in load_model_dict():
+                if not isinstance(item, dict):
+                    continue
+                name = str(item.get("name") or "")
+                url = str(item.get("url") or "")
+                if not name or not url:
+                    continue
+                avatar_file = item.get("avatar")
+                if not avatar_file:
+                    candidate_dir = Path(live2d_dir) / name
+                    if candidate_dir.is_dir():
+                        avatar_file = _find_preview_image(candidate_dir, name)
+                valid_characters.append(
+                    {
+                        "name": name,
+                        "avatar": avatar_file,
+                        "model_path": url.lstrip("/"),
+                        "url": url,
+                        "format": detect_model_format_from_entry(item),
+                    }
+                )
+                seen_names.add(name)
+        except Exception as e:
+            logger.warning(f"Failed to read model_dict.json in /live2d-models/info: {e}")
 
-                if os.path.isfile(model3_file):
-                    # Find avatar file if it exists
-                    avatar_file = None
-                    for ext in supported_extensions:
-                        avatar_path = os.path.join(
-                            live2d_dir, folder_name, f"{folder_name}{ext}"
+        if os.path.exists(live2d_dir):
+            supported_extensions = [".png", ".jpg", ".jpeg", ".webp"]
+            for entry in os.scandir(live2d_dir):
+                if entry.is_dir() and entry.name not in seen_names:
+                    folder_name = entry.name.replace("\\", "/")
+                    model3_file = os.path.join(
+                        live2d_dir, folder_name, f"{folder_name}.model3.json"
+                    ).replace("\\", "/")
+
+                    if os.path.isfile(model3_file):
+                        avatar_file = None
+                        for ext in supported_extensions:
+                            avatar_path = os.path.join(
+                                live2d_dir, folder_name, f"{folder_name}{ext}"
+                            )
+                            if os.path.isfile(avatar_path):
+                                avatar_file = avatar_path.replace("\\", "/")
+                                break
+
+                        valid_characters.append(
+                            {
+                                "name": folder_name,
+                                "avatar": avatar_file,
+                                "model_path": model3_file,
+                                "url": "/" + model3_file.lstrip("/"),
+                                "format": "cubism3",
+                            }
                         )
-                        if os.path.isfile(avatar_path):
-                            avatar_file = avatar_path.replace("\\", "/")
-                            break
-
-                    valid_characters.append(
-                        {
-                            "name": folder_name,
-                            "avatar": avatar_file,
-                            "model_path": model3_file,
-                        }
-                    )
         return JSONResponse(
             {
                 "type": "live2d-models/info",
@@ -589,9 +617,19 @@ def init_webtool_routes(default_context_cache: ServiceContext) -> APIRouter:
             if len(contents) < 44:  # Minimum WAV header size
                 raise ValueError("Invalid WAV file: File too small")
 
-            # Decode the WAV header and get actual audio data
-            wav_header_size = 44  # Standard WAV header size
-            audio_data = contents[wav_header_size:]
+            # Parse WAV chunks safely using the standard wave module, falling back
+            # to a 44-byte header offset if the container uses non-standard tags
+            # while still carrying raw 16-bit PCM frames.
+            try:
+                with wave.open(io.BytesIO(contents), "rb") as wf:
+                    if wf.getsampwidth() != 2:
+                        raise ValueError(
+                            f"Audio format error: Unsupported sample width ({wf.getsampwidth()} bytes). Please ensure the file is 16-bit PCM WAV format."
+                        )
+                    audio_data = wf.readframes(wf.getnframes())
+            except wave.Error:
+                wav_header_size = 44  # Standard WAV header size fallback
+                audio_data = contents[wav_header_size:]
 
             # Validate audio data size
             if len(audio_data) % 2 != 0:
@@ -638,6 +676,7 @@ def init_webtool_routes(default_context_cache: ServiceContext) -> APIRouter:
     @router.websocket("/tts-ws")
     async def tts_endpoint(websocket: WebSocket):
         """WebSocket endpoint for TTS generation"""
+        nonlocal tts_connections
         await websocket.accept()
 
         # Handle authentication (fail closed; an empty API key never disables auth)
@@ -656,7 +695,7 @@ def init_webtool_routes(default_context_cache: ServiceContext) -> APIRouter:
                 auth_msg = await asyncio.wait_for(websocket.receive_json(), timeout=5.0)
                 supplied_api_key = _normalize_api_key(auth_msg.get("api_key")) if auth_msg.get("type") == "auth" else None
 
-            if supplied_api_key != expected_api_key:
+            if not supplied_api_key or not secrets.compare_digest(supplied_api_key, expected_api_key):
                 logger.warning("TTS WebSocket authentication failed")
                 await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
                 return

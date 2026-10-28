@@ -45,8 +45,33 @@ class Live2dModel:
         """
 
         self.model_info: dict = self._lookup_model_info(model_name)
+        if "format" not in self.model_info:
+            url_lower = str(self.model_info.get("url") or "").lower()
+            if url_lower.endswith(".vrm"):
+                self.model_info["format"] = "vrm"
+            elif url_lower.endswith(".glb") or url_lower.endswith(".gltf"):
+                self.model_info["format"] = "gltf"
+            elif url_lower.endswith(".model3.json"):
+                self.model_info["format"] = "cubism3"
+            elif url_lower.endswith(".model.json"):
+                self.model_info["format"] = "cubism2"
+            elif url_lower.endswith("pngtuber.json") or url_lower.endswith(".png") or url_lower.endswith(".webp"):
+                self.model_info["format"] = "pngtuber"
+            else:
+                self.model_info["format"] = "cubism3"
+        emotion_map = self.model_info.get("emotionMap") or {
+            "neutral": 0,
+            "anger": 2,
+            "disgust": 2,
+            "fear": 1,
+            "joy": 3,
+            "smirk": 3,
+            "sadness": 1,
+            "surprise": 3,
+        }
+        self.model_info["emotionMap"] = emotion_map
         self.emo_map: dict = {
-            k.lower(): v for k, v in self.model_info["emotionMap"].items()
+            k.lower(): v for k, v in emotion_map.items()
         }
         self.emo_str: str = " ".join([f"[{key}]," for key in self.emo_map.keys()])
         # emo_str is a string of the keys in the emoMap dictionary. The keys are enclosed in square brackets.

@@ -16,6 +16,7 @@ from starlette.staticfiles import StaticFiles as StarletteStaticFiles
 
 from .routes import init_client_ws_route, init_webtool_routes, init_proxy_route, init_artifact_download_routes
 from .llm_provider_routes import init_llm_provider_routes
+from .avatar_manager import init_avatar_model_routes
 from .service_context import ServiceContext
 from .config_manager.utils import Config
 
@@ -47,10 +48,11 @@ class AvatarStaticFiles(CORSStaticFiles):
     """
 
     async def get_response(self, path: str, scope):
-        allowed_extensions = (".jpg", ".jpeg", ".png", ".gif", ".svg")
+        allowed_extensions = (".jpg", ".jpeg", ".png", ".gif", ".webp")
         if not any(path.lower().endswith(ext) for ext in allowed_extensions):
             return Response("Forbidden file type", status_code=403)
         response = await super().get_response(path, scope)
+        response.headers["X-Content-Type-Options"] = "nosniff"
         return response
 
 
@@ -84,13 +86,17 @@ class WebSocketServer:
         system_config = self.config.system_config
         allowed_origins = (
             system_config.allowed_origins
-            if hasattr(system_config, "allowed_origins")
-            else ["*"]
+            if hasattr(system_config, "allowed_origins") and system_config.allowed_origins
+            else [
+                "http://localhost:12393",
+                "http://127.0.0.1:12393",
+                "http://localhost:3000",
+            ]
         )
         self.app.add_middleware(
             CORSMiddleware,
             allow_origins=allowed_origins,
-            allow_credentials=True,
+            allow_credentials="*" not in allowed_origins,
             allow_methods=["*"],
             allow_headers=["*"],
         )
@@ -108,6 +114,9 @@ class WebSocketServer:
         )
         self.app.include_router(
             init_llm_provider_routes(default_context_cache=self.default_context_cache),
+        )
+        self.app.include_router(
+            init_avatar_model_routes(default_context_cache=self.default_context_cache),
         )
 
         # Initialize and include proxy routes if proxy is enabled

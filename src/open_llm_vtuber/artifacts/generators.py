@@ -3,7 +3,6 @@ from __future__ import annotations
 
 from io import BytesIO
 from tempfile import SpooledTemporaryFile
-from pathlib import Path
 from typing import Any, Iterable
 
 MAX_TEXT_BYTES = 10 * 1024 * 1024

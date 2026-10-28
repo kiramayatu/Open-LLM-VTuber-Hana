@@ -1,5 +1,6 @@
 import asyncio
 import json
+import secrets
 import uuid
 from typing import Dict, Optional
 from fastapi import WebSocket
@@ -8,6 +9,16 @@ import aiohttp
 from starlette.websockets import WebSocketDisconnect
 
 from .proxy_message_queue import ProxyMessageQueue
+
+
+def _normalize_api_key(value: Optional[str]) -> str:
+    """Strip surrounding whitespace and matching outer quotes from an API key."""
+    if value is None:
+        return ""
+    value = value.strip()
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
+        value = value[1:-1].strip()
+    return value
 
 
 class ProxyHandler:
@@ -112,26 +123,39 @@ class ProxyHandler:
         """
         await websocket.accept()
 
-        # Handle client authentication
-        if self.api_key:
-            try:
+        # Handle client authentication (fail closed; an empty API key never disables auth)
+        expected_api_key = _normalize_api_key(self.api_key)
+        if not expected_api_key:
+            logger.error("Proxy client connection rejected: server API key is not configured")
+            await websocket.close(code=1008)
+            return
+
+        try:
+            query_api_key = websocket.query_params.get("api_key")
+            if query_api_key:
+                supplied_api_key = _normalize_api_key(query_api_key)
+            else:
                 auth_msg = await asyncio.wait_for(websocket.receive_json(), timeout=5.0)
-                if (
-                    auth_msg.get("type") != "auth"
-                    or auth_msg.get("api_key") != self.api_key
-                ):
-                    logger.warning("Proxy client authentication failed")
-                    await websocket.close(code=1008)
-                    return
-                logger.info("Proxy client authenticated successfully")
-            except asyncio.TimeoutError:
-                logger.warning("Proxy client authentication timed out")
+                supplied_api_key = (
+                    _normalize_api_key(auth_msg.get("api_key"))
+                    if auth_msg.get("type") == "auth"
+                    else ""
+                )
+            if not supplied_api_key or not secrets.compare_digest(
+                supplied_api_key, expected_api_key
+            ):
+                logger.warning("Proxy client authentication failed")
                 await websocket.close(code=1008)
                 return
-            except Exception as e:
-                logger.error(f"Error during proxy client authentication: {e}")
-                await websocket.close(code=1008)
-                return
+            logger.info("Proxy client authenticated successfully")
+        except asyncio.TimeoutError:
+            logger.warning("Proxy client authentication timed out")
+            await websocket.close(code=1008)
+            return
+        except Exception as e:
+            logger.error(f"Error during proxy client authentication: {e}")
+            await websocket.close(code=1008)
+            return
 
         # Generate a unique client ID
         client_id = str(uuid.uuid4())

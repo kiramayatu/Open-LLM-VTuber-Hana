@@ -30,7 +30,7 @@ from ...mcpp.types import ToolCallObject
 from ...mcpp.tool_executor import ToolExecutor
 from ...artifacts.workspace import WorkspaceManager
 from ...artifacts.manager import ArtifactManager
-from ...artifacts.tools import ARTIFACT_TOOL_NAMES, ARTIFACT_TOOLS_OPENAI, ARTIFACT_TOOLS_CLAUDE, ArtifactToolService
+from ...artifacts.tools import ARTIFACT_TOOLS_OPENAI, ARTIFACT_TOOLS_CLAUDE, ArtifactToolService
 
 
 class BasicMemoryAgent(AgentInterface):
