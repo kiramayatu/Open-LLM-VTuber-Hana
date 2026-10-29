@@ -9,7 +9,7 @@ Supports uploading and managing 2D and 3D VTuber avatars directly from the UI:
 
 Enforces strict security boundaries:
 - Zip-Slip path traversal containment (`target.relative_to(dest_root)`)
-- Decompression bomb limits (max 500 files, max 250 MB uncompressed, max 150 MB upload)
+- Decompression bomb limits (max 2000 files, max 2048 MB uncompressed, max 1024 MB upload)
 - Executable / script extension blocklist
 """
 import io
@@ -25,9 +25,9 @@ if TYPE_CHECKING:
     from fastapi import APIRouter
     from .service_context import ServiceContext
 
-MAX_UPLOAD_BYTES = 150 * 1024 * 1024  # 150 MB compressed upload limit
-MAX_EXTRACTED_BYTES = 250 * 1024 * 1024  # 250 MB uncompressed limit
-MAX_ARCHIVE_FILES = 500
+MAX_UPLOAD_BYTES = 1024 * 1024 * 1024  # 1024 MB (1 GB) compressed upload limit
+MAX_EXTRACTED_BYTES = 2 * 1024 * 1024 * 1024  # 2048 MB (2 GB) uncompressed limit
+MAX_ARCHIVE_FILES = 2000
 
 FORBIDDEN_EXTENSIONS = {
     ".exe",
@@ -63,7 +63,7 @@ FORBIDDEN_EXTENSIONS = {
     ".htm",
 }
 
-ALLOWED_SINGLE_EXTENSIONS = {".vrm", ".glb", ".png", ".webp", ".gif"}
+ALLOWED_SINGLE_EXTENSIONS = {".vrm", ".glb", ".mqo", ".png", ".webp", ".gif"}
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
 
 DEFAULT_EMOTION_MAP = {
@@ -89,15 +89,17 @@ def sanitize_model_name(raw_name: str) -> str:
 
 
 def detect_model_format_from_entry(entry: dict[str, Any]) -> str:
-    """Infer avatar format (`cubism3`, `cubism2`, `vrm`, `gltf`, `pngtuber`) from a model_dict entry."""
+    """Infer avatar format (`cubism3`, `cubism2`, `vrm`, `gltf`, `mqo`, `pngtuber`) from a model_dict entry."""
     explicit = str(entry.get("format") or "").strip().lower()
-    if explicit in {"cubism3", "cubism2", "vrm", "gltf", "pngtuber"}:
+    if explicit in {"cubism3", "cubism2", "vrm", "gltf", "mqo", "pngtuber"}:
         return explicit
     url = str(entry.get("url") or "").strip().lower()
     if url.endswith(".vrm"):
         return "vrm"
     if url.endswith(".glb") or url.endswith(".gltf"):
         return "gltf"
+    if url.endswith(".mqo"):
+        return "mqo"
     if url.endswith(".model3.json"):
         return "cubism3"
     if url.endswith(".model.json"):
@@ -210,7 +212,7 @@ def _extract_zip_safely(zip_bytes: bytes, dest_dir: Path) -> list[Path]:
 
                 total_uncompressed += max(0, info.file_size)
                 if total_uncompressed > MAX_EXTRACTED_BYTES:
-                    raise ValueError("Archive exceeds maximum uncompressed size limit (250MB)")
+                    raise ValueError("Archive exceeds maximum uncompressed size limit (2048MB / 2GB)")
 
                 target_path = (dest_root / rel_path).resolve()
                 try:
@@ -282,7 +284,15 @@ def _detect_and_configure_extracted_model(
         url = "/" + chosen.as_posix().lstrip("/")
         return "gltf", url, {}
 
-    # 5. Check for PNGTuber manifest or multi-state sprite images
+    # 5. Check for 3D Metasequoia (*.mqo)
+    mqo_files = [f for f in rel_files if f.suffix.lower() == ".mqo"]
+    if mqo_files:
+        mqo_files.sort(key=lambda p: len(p.parts))
+        chosen = model_dir / mqo_files[0]
+        url = "/" + chosen.as_posix().lstrip("/")
+        return "mqo", url, {}
+
+    # 6. Check for PNGTuber manifest or multi-state sprite images
     manifest_path = model_dir / "pngtuber.json"
     image_files = [f for f in rel_files if f.suffix.lower() in IMAGE_EXTENSIONS]
     if manifest_path.is_file() or image_files:
@@ -358,7 +368,7 @@ def ingest_avatar_package(
     if not contents:
         raise ValueError("Uploaded file is empty")
     if len(contents) > MAX_UPLOAD_BYTES:
-        raise ValueError("Uploaded file exceeds 150MB limit")
+        raise ValueError("Uploaded file exceeds 1024MB (1GB) limit")
 
     orig_path = Path(filename or "avatar")
     ext = orig_path.suffix.lower()
@@ -532,7 +542,7 @@ def init_avatar_model_routes(default_context_cache: "ServiceContext") -> "APIRou
             if len(contents) > MAX_UPLOAD_BYTES:
                 raise HTTPException(
                     status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
-                    detail="Uploaded avatar exceeds maximum size of 150MB",
+                    detail="Uploaded avatar exceeds maximum size of 1024MB (1GB)",
                 )
             entry = ingest_avatar_package(
                 filename=file.filename or "avatar.zip",

@@ -117,13 +117,28 @@ class TestAvatarManagerAndSecurity(unittest.TestCase):
             self.assertEqual(e_png["format"], "pngtuber")
             self.assertEqual(detect_model_format_from_entry(e_png), "pngtuber")
 
+            # 6. 3D Metasequoia (.mqo) archive with texture maps
+            buf = io.BytesIO()
+            with zipfile.ZipFile(buf, "w") as zf:
+                zf.writestr("hanamqo/hana.mqo", "Metasequoia Document\nFormat Text Ver 1.1\n")
+                zf.writestr("hanamqo/maps/body.png", b"\x89PNG\r\n")
+            e_mqo = ingest_avatar_package(
+                "hanamqo.zip",
+                buf.getvalue(),
+                models_root=models_root,
+                model_dict_path=dict_path,
+            )
+            self.assertEqual(e_mqo["format"], "mqo")
+            self.assertTrue(e_mqo["url"].endswith("hana.mqo"))
+            self.assertEqual(detect_model_format_from_entry(e_mqo), "mqo")
+
             # Verify Live2dModel loads each format cleanly and extracts emotions
-            for model_name in ("hana_3d", "robot", "mao_custom", "shizuku", "chibi_png"):
+            for model_name in ("hana_3d", "robot", "mao_custom", "shizuku", "chibi_png", "hanamqo"):
                 m = Live2dModel(model_name, model_dict_path=str(dict_path))
                 self.assertEqual(m.extract_emotion("Hello [joy] world!"), [3])
 
             entries = load_model_dict(dict_path)
-            self.assertEqual(len(entries), 5)
+            self.assertEqual(len(entries), 6)
 
     def test_frontend_avatar_runtime_and_uploader_bundled(self):
         root = Path(__file__).parents[1]

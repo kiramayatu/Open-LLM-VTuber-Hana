@@ -117,11 +117,11 @@
         }
     },
     {
-        "name": "Image_rxfgotrxfgotrxfg",
-        "description": "PNGTUBER Avatar (Image_rxfgotrxfgotrxfg)",
-        "format": "pngtuber",
-        "url": "/live2d-models/Image_rxfgotrxfgotrxfg/pngtuber.json",
-        "avatar": "/live2d-models/Image_rxfgotrxfgotrxfg/Image_rxfgotrxfgotrxfg.png",
+        "name": "most-heretical-last-boss-queen-pride-royal-ivy",
+        "description": "GLTF Avatar (most-heretical-last-boss-queen-pride-royal-ivy)",
+        "format": "gltf",
+        "url": "/live2d-models/most-heretical-last-boss-queen-pride-royal-ivy/source/Pose.glb",
+        "avatar": "/live2d-models/most-heretical-last-boss-queen-pride-royal-ivy/textures/Dress_0.png",
         "kScale": 0.5,
         "initialXshift": 0,
         "initialYshift": 0,
@@ -144,17 +144,36 @@
             "HitAreaBody": {
                 "": 1
             }
+        }
+    },
+    {
+        "name": "hanamqo",
+        "description": "MQO Avatar (hanamqo)",
+        "format": "mqo",
+        "url": "/live2d-models/hanamqo/hana.mqo",
+        "avatar": "/live2d-models/hanamqo/maps/accessory.png",
+        "kScale": 0.5,
+        "initialXshift": 0,
+        "initialYshift": 0,
+        "kXOffset": 1150,
+        "idleMotionGroupName": "Idle",
+        "emotionMap": {
+            "neutral": 0,
+            "anger": 2,
+            "disgust": 2,
+            "fear": 1,
+            "joy": 3,
+            "smirk": 3,
+            "sadness": 1,
+            "surprise": 3
         },
-        "pngtuber": {
-            "name": "Image_rxfgotrxfgotrxfg",
-            "format": "pngtuber",
-            "states": {
-                "closed": "/live2d-models/Image_rxfgotrxfgotrxfg/Image_rxfgotrxfgotrxfg.png",
-                "open": "/live2d-models/Image_rxfgotrxfgotrxfg/Image_rxfgotrxfgotrxfg.png"
+        "tapMotions": {
+            "HitAreaHead": {
+                "": 1
             },
-            "emotions": {},
-            "lipSyncThreshold": 0.08,
-            "bounceIntensity": 6.0
+            "HitAreaBody": {
+                "": 1
+            }
         }
     }
 ]
