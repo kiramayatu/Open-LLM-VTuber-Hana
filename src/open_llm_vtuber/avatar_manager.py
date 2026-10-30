@@ -21,6 +21,8 @@ import zipfile
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+import yaml
+
 if TYPE_CHECKING:
     from fastapi import APIRouter
     from .service_context import ServiceContext
@@ -354,6 +356,226 @@ def _detect_and_configure_extracted_model(
     )
 
 
+def _safe_load_yaml(path: str | Path) -> dict[str, Any]:
+    p = Path(path)
+    if not p.is_file():
+        return {}
+    for enc in ("utf-8", "utf-8-sig", "gbk", "cp936"):
+        try:
+            raw = p.read_text(encoding=enc)
+            data = yaml.safe_load(raw)
+            return data if isinstance(data, dict) else {}
+        except Exception:
+            continue
+    return {}
+
+
+def _scan_presets(characters_dir: str | Path = "characters", base_conf_path: str | Path = "conf.yaml") -> list[dict[str, Any]]:
+    presets: list[dict[str, Any]] = []
+    if Path(base_conf_path).is_file():
+        base_data = _safe_load_yaml(base_conf_path)
+        base_char = base_data.get("character_config") if isinstance(base_data, dict) else {}
+        if not isinstance(base_char, dict):
+            base_char = {}
+        presets.append(
+            {
+                "filename": Path(base_conf_path).name,
+                "name": base_char.get("conf_name") or Path(base_conf_path).name,
+                "live2d_model_name": base_char.get("live2d_model_name"),
+            }
+        )
+    chars_root = Path(characters_dir)
+    if chars_root.is_dir():
+        for f in sorted(chars_root.glob("*.yaml")):
+            data = _safe_load_yaml(f)
+            char_cfg = data.get("character_config") if isinstance(data, dict) else {}
+            if not isinstance(char_cfg, dict):
+                char_cfg = {}
+            presets.append(
+                {
+                    "filename": f.name,
+                    "name": char_cfg.get("conf_name") or f.name,
+                    "live2d_model_name": char_cfg.get("live2d_model_name"),
+                }
+            )
+    return presets
+
+
+def read_character_persona(
+    model_or_conf_name: str,
+    *,
+    characters_dir: str | Path = "characters",
+    base_conf_path: str | Path = "conf.yaml",
+) -> dict[str, Any]:
+    """Read character persona settings for `model_or_conf_name` from `characters/<name>.yaml` or `conf.yaml`."""
+    clean_name = sanitize_model_name(model_or_conf_name)
+    chars_root = Path(characters_dir)
+    chars_root.mkdir(parents=True, exist_ok=True)
+    resolved_chars = chars_root.resolve()
+
+    yaml_path = (resolved_chars / f"{clean_name}.yaml").resolve()
+    try:
+        yaml_path.relative_to(resolved_chars)
+    except ValueError as exc:
+        raise ValueError("Invalid character configuration path") from exc
+
+    char_cfg: dict[str, Any] = {}
+    source_file = f"{clean_name}.yaml"
+
+    if yaml_path.is_file():
+        data = _safe_load_yaml(yaml_path)
+        if isinstance(data, dict):
+            char_cfg = data.get("character_config") or {}
+    else:
+        # Check if any existing preset in characters/ links to this model or conf_name
+        for candidate in sorted(chars_root.glob("*.yaml")):
+            try:
+                data = _safe_load_yaml(candidate)
+                c = data.get("character_config") if isinstance(data, dict) else None
+                if isinstance(c, dict) and (
+                    c.get("live2d_model_name") == clean_name
+                    or c.get("conf_name") == clean_name
+                ):
+                    char_cfg = c
+                    source_file = candidate.name
+                    break
+            except Exception:
+                continue
+
+        if not char_cfg and Path(base_conf_path).is_file():
+            try:
+                base_data = _safe_load_yaml(base_conf_path)
+                base_char = (
+                    base_data.get("character_config")
+                    if isinstance(base_data, dict)
+                    else None
+                )
+                if isinstance(base_char, dict) and (
+                    base_char.get("live2d_model_name") == clean_name
+                    or base_char.get("conf_name") == clean_name
+                ):
+                    char_cfg = base_char
+                    source_file = Path(base_conf_path).name
+            except Exception:
+                pass
+
+    default_display = clean_name.replace("_", " ").replace("-", " ").strip() or clean_name
+    character_name = str(char_cfg.get("character_name") or char_cfg.get("conf_name") or default_display)
+    human_name = str(char_cfg.get("human_name") or "User")
+    persona_prompt = str(
+        char_cfg.get("persona_prompt")
+        or f"You are {character_name}, a friendly, expressive AI VTuber chatting with {human_name}."
+    )
+    conf_name = str(char_cfg.get("conf_name") or clean_name)
+    conf_uid = str(char_cfg.get("conf_uid") or f"{clean_name}_001")
+    live2d_model_name = str(char_cfg.get("live2d_model_name") or clean_name)
+
+    return {
+        "conf_name": conf_name,
+        "conf_uid": conf_uid,
+        "live2d_model_name": live2d_model_name,
+        "character_name": character_name,
+        "human_name": human_name,
+        "persona_prompt": persona_prompt,
+        "filename": source_file,
+        "exists": yaml_path.is_file(),
+    }
+
+
+def save_character_persona(
+    model_or_conf_name: str,
+    *,
+    character_name: str | None = None,
+    human_name: str | None = None,
+    persona_prompt: str | None = None,
+    live2d_model_name: str | None = None,
+    avatar: str | None = None,
+    characters_dir: str | Path = "characters",
+    overwrite_existing: bool = True,
+) -> dict[str, Any]:
+    """Create or update `characters/<name>.yaml` atomically while preserving any extra settings."""
+    clean_name = sanitize_model_name(model_or_conf_name)
+    chars_root = Path(characters_dir)
+    chars_root.mkdir(parents=True, exist_ok=True)
+    resolved_chars = chars_root.resolve()
+
+    yaml_path = (resolved_chars / f"{clean_name}.yaml").resolve()
+    try:
+        yaml_path.relative_to(resolved_chars)
+    except ValueError as exc:
+        raise ValueError("Invalid character configuration path") from exc
+
+    if yaml_path.is_file() and not overwrite_existing:
+        return read_character_persona(clean_name, characters_dir=characters_dir)
+
+    existing_doc: dict[str, Any] = {}
+    if yaml_path.is_file():
+        existing_doc = _safe_load_yaml(yaml_path)
+
+    char_cfg = existing_doc.get("character_config")
+    if not isinstance(char_cfg, dict):
+        char_cfg = {}
+
+    default_display = clean_name.replace("_", " ").replace("-", " ").strip() or clean_name
+    final_char_name = (
+        character_name.strip()
+        if character_name and character_name.strip()
+        else str(char_cfg.get("character_name") or default_display)
+    )[:64]
+    final_human_name = (
+        human_name.strip()
+        if human_name and human_name.strip()
+        else str(char_cfg.get("human_name") or "User")
+    )[:64]
+    final_prompt = (
+        persona_prompt.strip()
+        if persona_prompt is not None and persona_prompt.strip()
+        else str(
+            char_cfg.get("persona_prompt")
+            or f"You are {final_char_name}, a friendly, expressive AI VTuber chatting with {final_human_name}."
+        )
+    )[:16384]
+    final_model_name = (
+        sanitize_model_name(live2d_model_name)
+        if live2d_model_name
+        else str(char_cfg.get("live2d_model_name") or clean_name)
+    )
+
+    char_cfg["conf_name"] = str(char_cfg.get("conf_name") or clean_name)
+    char_cfg["conf_uid"] = str(char_cfg.get("conf_uid") or f"{clean_name}_001")
+    char_cfg["live2d_model_name"] = final_model_name
+    char_cfg["character_name"] = final_char_name
+    char_cfg["human_name"] = final_human_name
+    char_cfg["persona_prompt"] = final_prompt
+    if avatar:
+        char_cfg["avatar"] = Path(avatar).name
+
+    existing_doc["character_config"] = char_cfg
+
+    tmp_path = yaml_path.with_suffix(".yaml.tmp")
+    tmp_path.write_text(
+        yaml.safe_dump(
+            existing_doc,
+            allow_unicode=True,
+            sort_keys=False,
+            default_flow_style=False,
+        ),
+        encoding="utf-8",
+    )
+    tmp_path.replace(yaml_path)
+
+    return {
+        "conf_name": char_cfg["conf_name"],
+        "conf_uid": char_cfg["conf_uid"],
+        "live2d_model_name": char_cfg["live2d_model_name"],
+        "character_name": char_cfg["character_name"],
+        "human_name": char_cfg["human_name"],
+        "persona_prompt": char_cfg["persona_prompt"],
+        "filename": yaml_path.name,
+        "exists": True,
+    }
+
+
 def ingest_avatar_package(
     filename: str,
     contents: bytes,
@@ -361,8 +583,12 @@ def ingest_avatar_package(
     custom_name: str | None = None,
     description: str = "",
     k_scale: float = 0.5,
+    character_name: str | None = None,
+    human_name: str | None = None,
+    persona_prompt: str | None = None,
     models_root: str | Path = "live2d-models",
     model_dict_path: str | Path = "model_dict.json",
+    characters_dir: str | Path = "characters",
 ) -> dict[str, Any]:
     """Validate, extract/store, auto-detect, and register a new VTuber avatar."""
     if not contents:
@@ -448,6 +674,23 @@ def ingest_avatar_package(
     if not updated:
         entries.append(entry)
     save_model_dict(entries, model_dict_path)
+
+    # Auto-provision or update the 1:1 character preset in characters/<base_name>.yaml
+    has_explicit_persona = any(
+        val is not None and str(val).strip()
+        for val in (character_name, human_name, persona_prompt)
+    )
+    persona_info = save_character_persona(
+        base_name,
+        character_name=character_name,
+        human_name=human_name,
+        persona_prompt=persona_prompt,
+        live2d_model_name=base_name,
+        avatar=preview,
+        characters_dir=characters_dir,
+        overwrite_existing=has_explicit_persona,
+    )
+    entry["character_persona"] = persona_info
     return entry
 
 
@@ -472,6 +715,12 @@ def init_avatar_model_routes(default_context_cache: "ServiceContext") -> "APIRou
 
     class SelectAvatarRequest(BaseModel):
         name: str = Field(..., min_length=1, max_length=64)
+
+    class CharacterPersonaUpdate(BaseModel):
+        character_name: str = Field(..., min_length=1, max_length=64)
+        human_name: str = Field(default="User", min_length=1, max_length=64)
+        persona_prompt: str = Field(..., min_length=1, max_length=16384)
+        avatar: str | None = Field(default=None, max_length=256)
 
     router = APIRouter()
 
@@ -522,10 +771,16 @@ def init_avatar_model_routes(default_context_cache: "ServiceContext") -> "APIRou
                     "active": name == active_name,
                 }
             )
+        config_alts_dir = (
+            default_context_cache.system_config.config_alts_dir
+            if default_context_cache and default_context_cache.system_config
+            else "characters"
+        )
         return {
             "models": enriched,
             "active_model": active_name,
             "count": len(enriched),
+            "config_files": _scan_presets(config_alts_dir),
         }
 
     @router.post("/api/models/upload", dependencies=[Depends(verify_api_key)])
@@ -535,8 +790,11 @@ def init_avatar_model_routes(default_context_cache: "ServiceContext") -> "APIRou
         description: str = Form(default=""),
         k_scale: float = Form(default=0.5),
         activate: bool = Form(default=True),
+        character_name: str | None = Form(default=None),
+        human_name: str | None = Form(default=None),
+        persona_prompt: str | None = Form(default=None),
     ):
-        """Upload a .zip (Cubism 3/4/5, Cubism 2.1, VRM, glTF, PNGTuber) or single .vrm/.glb/.png avatar."""
+        """Upload a .zip (Cubism 3/4/5, Cubism 2.1, VRM, glTF, MQO, PNGTuber) or single .vrm/.glb/.mqo/.png avatar."""
         try:
             contents = await file.read(MAX_UPLOAD_BYTES + 1)
             if len(contents) > MAX_UPLOAD_BYTES:
@@ -544,12 +802,21 @@ def init_avatar_model_routes(default_context_cache: "ServiceContext") -> "APIRou
                     status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
                     detail="Uploaded avatar exceeds maximum size of 1024MB (1GB)",
                 )
+            config_alts_dir = (
+                default_context_cache.system_config.config_alts_dir
+                if default_context_cache and default_context_cache.system_config
+                else "characters"
+            )
             entry = ingest_avatar_package(
                 filename=file.filename or "avatar.zip",
                 contents=contents,
                 custom_name=name,
                 description=description,
                 k_scale=k_scale,
+                character_name=character_name,
+                human_name=human_name,
+                persona_prompt=persona_prompt,
+                characters_dir=config_alts_dir,
             )
             if activate and default_context_cache and default_context_cache.character_config:
                 default_context_cache.init_live2d(entry["name"])
@@ -561,6 +828,7 @@ def init_avatar_model_routes(default_context_cache: "ServiceContext") -> "APIRou
                     if default_context_cache and default_context_cache.character_config
                     else entry["name"]
                 ),
+                "config_files": _scan_presets(config_alts_dir),
             }
         except HTTPException:
             raise
@@ -643,6 +911,20 @@ def init_avatar_model_routes(default_context_cache: "ServiceContext") -> "APIRou
         except ValueError:
             pass
 
+        config_alts_dir = (
+            default_context_cache.system_config.config_alts_dir
+            if default_context_cache and default_context_cache.system_config
+            else "characters"
+        )
+        chars_root = Path(config_alts_dir).resolve()
+        char_yaml = (chars_root / f"{clean_name}.yaml").resolve()
+        try:
+            char_yaml.relative_to(chars_root)
+            if char_yaml.is_file() and not char_yaml.is_symlink():
+                char_yaml.unlink()
+        except ValueError:
+            pass
+
         active_name = (
             default_context_cache.character_config.live2d_model_name
             if default_context_cache and default_context_cache.character_config
@@ -661,6 +943,81 @@ def init_avatar_model_routes(default_context_cache: "ServiceContext") -> "APIRou
             "deleted": clean_name,
             "active_model": active_name,
             "model_info": fallback_info,
+            "config_files": _scan_presets(config_alts_dir),
         }
+
+    @router.get("/api/characters/{character_id}", dependencies=[Depends(verify_api_key)])
+    async def get_character_persona_route(character_id: str):
+        """Return character persona settings (`character_name`, `human_name`, `persona_prompt`) for an avatar/preset."""
+        try:
+            config_alts_dir = (
+                default_context_cache.system_config.config_alts_dir
+                if default_context_cache and default_context_cache.system_config
+                else "characters"
+            )
+            persona = read_character_persona(
+                character_id, characters_dir=config_alts_dir
+            )
+            return {
+                "status": "ok",
+                "persona": persona,
+            }
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)
+            ) from exc
+
+    @router.post("/api/characters/{character_id}", dependencies=[Depends(verify_api_key)])
+    async def save_character_persona_route(
+        character_id: str, payload: CharacterPersonaUpdate
+    ):
+        """Create or update `characters/<character_id>.yaml` and hot-reload the active ServiceContext if active."""
+        try:
+            config_alts_dir = (
+                default_context_cache.system_config.config_alts_dir
+                if default_context_cache and default_context_cache.system_config
+                else "characters"
+            )
+            saved = save_character_persona(
+                character_id,
+                character_name=payload.character_name,
+                human_name=payload.human_name,
+                persona_prompt=payload.persona_prompt,
+                avatar=payload.avatar,
+                characters_dir=config_alts_dir,
+                overwrite_existing=True,
+            )
+
+            # Hot-reload default_context_cache if the edited character is currently active
+            hot_reloaded = False
+            if default_context_cache and default_context_cache.character_config:
+                active_model = default_context_cache.character_config.live2d_model_name
+                active_conf = default_context_cache.character_config.conf_name
+                if saved["live2d_model_name"] == active_model or saved["conf_name"] == active_conf:
+                    default_context_cache.character_config.character_name = saved["character_name"]
+                    default_context_cache.character_config.human_name = saved["human_name"]
+                    default_context_cache.character_config.persona_prompt = saved["persona_prompt"]
+                    try:
+                        await default_context_cache.init_agent(
+                            default_context_cache.character_config.agent_config,
+                            saved["persona_prompt"],
+                            force=True,
+                        )
+                        hot_reloaded = True
+                    except Exception as agent_err:
+                        logger.warning(
+                            f"Saved persona YAML for '{character_id}', but live agent reload failed: {agent_err}"
+                        )
+
+            return {
+                "status": "ok",
+                "persona": saved,
+                "hot_reloaded": hot_reloaded,
+                "config_files": _scan_presets(config_alts_dir),
+            }
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)
+            ) from exc
 
     return router

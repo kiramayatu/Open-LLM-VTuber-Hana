@@ -99,6 +99,7 @@ class WebSocketHandler:
             "fetch-configs": self._handle_fetch_configs,
             "switch-config": self._handle_config_switch,
             "switch-avatar-model": self._handle_avatar_model_switch,
+            "reload-character-persona": self._handle_reload_character_persona,
             "fetch-backgrounds": self._handle_fetch_backgrounds,
             "audio-play-start": self._handle_audio_play_start,
             "request-init-config": self._handle_init_config_request,
@@ -664,6 +665,50 @@ class WebSocketHandler:
                     }
                 )
             )
+
+    async def _handle_reload_character_persona(
+        self, websocket: WebSocket, client_uid: str, data: dict
+    ):
+        """Hot-reload character persona settings into the active client session context."""
+        from .avatar_manager import read_character_persona
+
+        target_id = (data.get("character_id") or data.get("name") or "").strip()
+        context = self.client_contexts.get(client_uid) or self.default_context_cache
+        if not context or not context.character_config:
+            return
+        try:
+            config_alts_dir = (
+                context.system_config.config_alts_dir
+                if context.system_config
+                else "characters"
+            )
+            if not target_id:
+                target_id = (
+                    context.character_config.live2d_model_name
+                    or context.character_config.conf_name
+                )
+            persona = read_character_persona(target_id, characters_dir=config_alts_dir)
+            active_model = context.character_config.live2d_model_name
+            active_conf = context.character_config.conf_name
+            if (
+                persona["live2d_model_name"] == active_model
+                or persona["conf_name"] == active_conf
+                or target_id in (active_model, active_conf)
+            ):
+                context.character_config.character_name = persona["character_name"]
+                context.character_config.human_name = persona["human_name"]
+                context.character_config.persona_prompt = persona["persona_prompt"]
+                await context.init_agent(
+                    context.character_config.agent_config,
+                    persona["persona_prompt"],
+                    force=True,
+                )
+            config_files = scan_config_alts_directory(config_alts_dir)
+            await websocket.send_text(
+                json.dumps({"type": "config-files", "configs": config_files})
+            )
+        except Exception as e:
+            logger.warning(f"Failed to hot-reload character persona in session: {e}")
 
     async def _handle_fetch_backgrounds(
         self, websocket: WebSocket, client_uid: str, data: WSMessage

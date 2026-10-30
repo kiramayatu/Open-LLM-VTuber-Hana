@@ -11,7 +11,9 @@ from open_llm_vtuber.avatar_manager import (
     detect_model_format_from_entry,
     ingest_avatar_package,
     load_model_dict,
+    read_character_persona,
     sanitize_model_name,
+    save_character_persona,
 )
 from open_llm_vtuber.live2d_model import Live2dModel
 
@@ -56,6 +58,7 @@ class TestAvatarManagerAndSecurity(unittest.TestCase):
     def test_multi_format_ingestion_and_live2d_model_lookup(self):
         with tempfile.TemporaryDirectory() as td:
             models_root = Path(td) / "live2d-models"
+            chars_root = Path(td) / "characters"
             dict_path = Path(td) / "model_dict.json"
             dict_path.write_text("[]\n", encoding="utf-8")
 
@@ -63,11 +66,20 @@ class TestAvatarManagerAndSecurity(unittest.TestCase):
             e_vrm = ingest_avatar_package(
                 "hana_3d.vrm",
                 b"glTF-vrm-mock",
+                character_name="Hana 3D",
+                human_name="Senpai",
+                persona_prompt="You are Hana 3D, a cheerful VTuber.",
                 models_root=models_root,
                 model_dict_path=dict_path,
+                characters_dir=chars_root,
             )
             self.assertEqual(e_vrm["format"], "vrm")
             self.assertTrue(e_vrm["url"].endswith("hana_3d.vrm"))
+            self.assertTrue((chars_root / "hana_3d.yaml").is_file())
+            p_vrm = read_character_persona("hana_3d", characters_dir=chars_root)
+            self.assertEqual(p_vrm["character_name"], "Hana 3D")
+            self.assertEqual(p_vrm["human_name"], "Senpai")
+            self.assertIn("cheerful VTuber", p_vrm["persona_prompt"])
 
             # 2. 3D GLB
             e_glb = ingest_avatar_package(
@@ -75,6 +87,7 @@ class TestAvatarManagerAndSecurity(unittest.TestCase):
                 b"glTF-glb-mock",
                 models_root=models_root,
                 model_dict_path=dict_path,
+                characters_dir=chars_root,
             )
             self.assertEqual(e_glb["format"], "gltf")
 
@@ -87,6 +100,7 @@ class TestAvatarManagerAndSecurity(unittest.TestCase):
                 buf.getvalue(),
                 models_root=models_root,
                 model_dict_path=dict_path,
+                characters_dir=chars_root,
             )
             self.assertEqual(e_c3["format"], "cubism3")
 
@@ -99,6 +113,7 @@ class TestAvatarManagerAndSecurity(unittest.TestCase):
                 buf.getvalue(),
                 models_root=models_root,
                 model_dict_path=dict_path,
+                characters_dir=chars_root,
             )
             self.assertEqual(e_c2["format"], "cubism2")
 
@@ -113,6 +128,7 @@ class TestAvatarManagerAndSecurity(unittest.TestCase):
                 buf.getvalue(),
                 models_root=models_root,
                 model_dict_path=dict_path,
+                characters_dir=chars_root,
             )
             self.assertEqual(e_png["format"], "pngtuber")
             self.assertEqual(detect_model_format_from_entry(e_png), "pngtuber")
@@ -127,10 +143,39 @@ class TestAvatarManagerAndSecurity(unittest.TestCase):
                 buf.getvalue(),
                 models_root=models_root,
                 model_dict_path=dict_path,
+                characters_dir=chars_root,
             )
             self.assertEqual(e_mqo["format"], "mqo")
             self.assertTrue(e_mqo["url"].endswith("hana.mqo"))
             self.assertEqual(detect_model_format_from_entry(e_mqo), "mqo")
+
+            # Verify updating persona via save_character_persona preserves live2d_model_name
+            updated_persona = save_character_persona(
+                "hanamqo",
+                character_name="Hana Fountainstand",
+                human_name="Captain",
+                persona_prompt="You are Hana, president of the Yosakoi club!",
+                characters_dir=chars_root,
+            )
+            self.assertEqual(updated_persona["character_name"], "Hana Fountainstand")
+            self.assertEqual(updated_persona["human_name"], "Captain")
+            self.assertEqual(updated_persona["live2d_model_name"], "hanamqo")
+
+            # Verify path traversal attempts in read_character_persona / save_character_persona are sanitized and stay inside chars_root
+            traversal_persona = save_character_persona(
+                "../../etc/passwd",
+                character_name="SafeChar",
+                human_name="SafeUser",
+                persona_prompt="Safe prompt.",
+                characters_dir=chars_root,
+            )
+            self.assertEqual(traversal_persona["conf_uid"], "etc_passwd_001")
+            self.assertTrue((chars_root / "etc_passwd.yaml").is_file())
+            loaded_traversal = read_character_persona(
+                "../../etc/passwd", characters_dir=chars_root
+            )
+            self.assertEqual(loaded_traversal["character_name"], "SafeChar")
+            self.assertEqual(loaded_traversal["human_name"], "SafeUser")
 
             # Verify Live2dModel loads each format cleanly and extracts emotions
             for model_name in ("hana_3d", "robot", "mao_custom", "shizuku", "chibi_png", "hanamqo"):
@@ -165,6 +210,9 @@ class TestAvatarManagerAndSecurity(unittest.TestCase):
             )
             self.assertIn("AvatarModelUploader", bundle_js)
             self.assertIn("/api/models/upload", bundle_js)
+            self.assertIn("Edit Persona", bundle_js)
+            self.assertIn("/api/characters/", bundle_js)
+            self.assertIn("reload-character-persona", bundle_js)
 
 
 if __name__ == "__main__":
