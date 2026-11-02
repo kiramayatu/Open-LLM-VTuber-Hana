@@ -34,12 +34,19 @@ conda
 
 # Sensitive data
 .env
+.env.*
 api_keys.py
 src/open_llm_vtuber/llm/user_credentials.json
+.llm_provider_secret.key
 
 # Database files
 memory.db
 memory.db.bk
+.llm_providers.sqlite3
+.llm_providers.sqlite3-*
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
 
 # Logs
 server.log
@@ -68,6 +75,8 @@ openapi_memgpt.json
 # memory log
 mem.json
 conf.yaml.backup
+conf (copy).yaml
+* (copy).*
 
 *.exe
 
@@ -76,6 +85,9 @@ private/
 mcp_servers.json
 
 .vscode/
+.ruff_cache/
+.pytest_cache/
+.letta/settings.local.json
 
 .agents/
 graphify-out/
