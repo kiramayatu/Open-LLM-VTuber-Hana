@@ -3,6 +3,7 @@ import re
 import json
 import uuid
 from datetime import datetime
+from pathlib import Path
 from typing import Literal, List, TypedDict, Optional
 from loguru import logger
 
@@ -21,6 +22,9 @@ def _is_safe_filename(filename: str) -> bool:
     if not filename or len(filename) > 255:
         return False
 
+    if filename in (".", "..") or ".." in filename or "/" in filename or "\\" in filename:
+        return False
+
     # Allow alphanumeric, hyphen, underscore, and common unicode characters
     # Block any filesystem special characters, control characters, and path separators
     pattern = re.compile(r"^[\w\-_\u0020-\u007E\u00A0-\uFFFF]+$")
@@ -29,10 +33,13 @@ def _is_safe_filename(filename: str) -> bool:
 
 def _sanitize_path_component(component: str) -> str:
     """Sanitize and validate a path component"""
-    # Remove any path components, get just the basename
-    sanitized = os.path.basename(component.strip())
+    raw = str(component).strip()
+    if not raw or "/" in raw or "\\" in raw or raw in (".", "..") or ".." in raw:
+        raise ValueError(f"Invalid characters in path component: {component}")
 
-    if not _is_safe_filename(sanitized):
+    sanitized = os.path.basename(raw)
+
+    if sanitized != raw or not _is_safe_filename(sanitized):
         raise ValueError(f"Invalid characters in path component: {component}")
 
     return sanitized
@@ -44,20 +51,34 @@ def _ensure_conf_dir(conf_uid: str) -> str:
         raise ValueError("conf_uid cannot be empty")
 
     safe_conf_uid = _sanitize_path_component(conf_uid)
-    base_dir = os.path.join("chat_history", safe_conf_uid)
+    root_dir = Path("chat_history").resolve()
+    base_dir = Path("chat_history") / safe_conf_uid
+    resolved_base = base_dir.resolve()
+    try:
+        resolved_base.relative_to(root_dir)
+    except ValueError as exc:
+        raise ValueError("Invalid path: Path traversal detected") from exc
+    if resolved_base == root_dir:
+        raise ValueError("Invalid path: Path traversal detected")
     os.makedirs(base_dir, exist_ok=True)
-    return base_dir
+    return str(base_dir)
 
 
 def _get_safe_history_path(conf_uid: str, history_uid: str) -> str:
     """Get sanitized path for history file"""
     safe_conf_uid = _sanitize_path_component(conf_uid)
     safe_history_uid = _sanitize_path_component(history_uid)
-    base_dir = os.path.join("chat_history", safe_conf_uid)
-    full_path = os.path.normpath(os.path.join(base_dir, f"{safe_history_uid}.json"))
-    if not full_path.startswith(base_dir):
+    root_dir = Path("chat_history").resolve()
+    base_dir = (Path("chat_history") / safe_conf_uid).resolve()
+    full_path = (base_dir / f"{safe_history_uid}.json").resolve()
+    try:
+        base_dir.relative_to(root_dir)
+        full_path.relative_to(base_dir)
+    except ValueError as exc:
+        raise ValueError("Invalid path: Path traversal detected") from exc
+    if base_dir == root_dir or full_path.parent != base_dir:
         raise ValueError("Invalid path: Path traversal detected")
-    return full_path
+    return os.path.normpath(os.path.join("chat_history", safe_conf_uid, f"{safe_history_uid}.json"))
 
 
 def create_new_history(conf_uid: str) -> str:

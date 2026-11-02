@@ -138,7 +138,22 @@ def save_model_dict(
 
 
 def _find_preview_image(model_dir: Path, model_name: str) -> str | None:
-    """Locate a thumbnail/preview image inside `model_dir`."""
+    """Locate a thumbnail/preview image inside `model_dir` or `avatars/`."""
+    # Check if there is a dedicated avatar image in `avatars/` matching the model name
+    avatars_dir = Path("avatars")
+    if avatars_dir.is_dir():
+        stem_variants = {
+            model_name.lower(),
+            model_name.lower().replace("_pro", "").replace("-local", ""),
+        }
+        if model_name.lower() == "type79":
+            stem_variants.add("type97")
+        for ext in (".png", ".jpg", ".jpeg", ".webp"):
+            for variant in stem_variants:
+                candidate_av = avatars_dir / f"{variant}{ext}"
+                if candidate_av.is_file():
+                    return candidate_av.name
+
     candidates: list[Path] = []
     for ext in (".png", ".jpg", ".jpeg", ".webp"):
         direct = model_dir / f"{model_name}{ext}"
@@ -470,6 +485,15 @@ def read_character_persona(
     conf_uid = str(char_cfg.get("conf_uid") or f"{clean_name}_001")
     live2d_model_name = str(char_cfg.get("live2d_model_name") or clean_name)
 
+    raw_avatar = str(char_cfg.get("avatar") or "").strip()
+    if raw_avatar == "mao.png" and not live2d_model_name.startswith("mao"):
+        raw_avatar = ""
+    if not raw_avatar:
+        candidate_dir = Path("live2d-models") / live2d_model_name
+        found_preview = _find_preview_image(candidate_dir, live2d_model_name)
+        if found_preview:
+            raw_avatar = found_preview
+
     return {
         "conf_name": conf_name,
         "conf_uid": conf_uid,
@@ -477,9 +501,40 @@ def read_character_persona(
         "character_name": character_name,
         "human_name": human_name,
         "persona_prompt": persona_prompt,
+        "avatar": raw_avatar,
         "filename": source_file,
         "exists": yaml_path.is_file(),
     }
+
+
+def _sanitize_avatar_path(avatar: str | None) -> str:
+    """Validate and sanitize a character avatar preview path or filename."""
+    if not avatar:
+        return ""
+    cleaned = str(avatar).strip()
+    if not cleaned:
+        return ""
+    if (
+        ":" in cleaned
+        or ".." in cleaned
+        or "\\" in cleaned
+        or cleaned.startswith("//")
+        or any(ch in cleaned for ch in ('<', '>', '"', "'", "\r", "\n", "\x00"))
+    ):
+        raise ValueError(f"Unsafe avatar path: {avatar}")
+    ext = Path(cleaned).suffix.lower()
+    if ext not in IMAGE_EXTENSIONS:
+        raise ValueError(f"Avatar must have a valid image extension: {avatar}")
+    if cleaned.startswith("/"):
+        if not (
+            "/live2d-models/" in cleaned
+            or cleaned.startswith("/avatars/")
+        ):
+            raise ValueError(f"Avatar path must reside under /live2d-models/ or /avatars/: {avatar}")
+        return cleaned
+    if "/" in cleaned:
+        raise ValueError(f"Relative avatar filename must not contain slashes: {avatar}")
+    return cleaned
 
 
 def save_character_persona(
@@ -548,7 +603,23 @@ def save_character_persona(
     char_cfg["human_name"] = final_human_name
     char_cfg["persona_prompt"] = final_prompt
     if avatar:
-        char_cfg["avatar"] = Path(avatar).name
+        char_cfg["avatar"] = _sanitize_avatar_path(avatar)
+    else:
+        existing_av = str(char_cfg.get("avatar") or "").strip()
+        if existing_av == "mao.png" and not final_model_name.startswith("mao"):
+            existing_av = ""
+        if existing_av:
+            try:
+                existing_av = _sanitize_avatar_path(existing_av)
+            except ValueError:
+                existing_av = ""
+        if not existing_av:
+            candidate_dir = Path("live2d-models") / final_model_name
+            found_preview = _find_preview_image(candidate_dir, final_model_name)
+            if found_preview:
+                char_cfg["avatar"] = found_preview
+        else:
+            char_cfg["avatar"] = existing_av
 
     existing_doc["character_config"] = char_cfg
 
@@ -571,6 +642,7 @@ def save_character_persona(
         "character_name": char_cfg["character_name"],
         "human_name": char_cfg["human_name"],
         "persona_prompt": char_cfg["persona_prompt"],
+        "avatar": str(char_cfg.get("avatar") or ""),
         "filename": yaml_path.name,
         "exists": True,
     }
@@ -752,6 +824,11 @@ def init_avatar_model_routes(default_context_cache: "ServiceContext") -> "APIRou
             if default_context_cache and default_context_cache.character_config
             else None
         )
+        config_alts_dir = (
+            default_context_cache.system_config.config_alts_dir
+            if default_context_cache and default_context_cache.system_config
+            else "characters"
+        )
         enriched = []
         for item in entries:
             if not isinstance(item, dict):
@@ -763,19 +840,26 @@ def init_avatar_model_routes(default_context_cache: "ServiceContext") -> "APIRou
                 candidate_dir = Path("live2d-models") / name
                 if candidate_dir.is_dir():
                     avatar = _find_preview_image(candidate_dir, name)
+            persona_summary = {}
+            if name:
+                try:
+                    persona_summary = read_character_persona(
+                        name, characters_dir=config_alts_dir
+                    )
+                except Exception:
+                    persona_summary = {}
             enriched.append(
                 {
                     **item,
                     "format": fmt,
                     "avatar": avatar,
                     "active": name == active_name,
+                    "character_name": persona_summary.get("character_name") or name,
+                    "human_name": persona_summary.get("human_name") or "User",
+                    "conf_name": persona_summary.get("conf_name") or name,
+                    "conf_uid": persona_summary.get("conf_uid") or f"{name}_001",
                 }
             )
-        config_alts_dir = (
-            default_context_cache.system_config.config_alts_dir
-            if default_context_cache and default_context_cache.system_config
-            else "characters"
-        )
         return {
             "models": enriched,
             "active_model": active_name,
@@ -820,6 +904,14 @@ def init_avatar_model_routes(default_context_cache: "ServiceContext") -> "APIRou
             )
             if activate and default_context_cache and default_context_cache.character_config:
                 default_context_cache.init_live2d(entry["name"])
+                p_info = entry.get("character_persona") or {}
+                if p_info:
+                    default_context_cache.character_config.conf_name = p_info.get("conf_name") or entry["name"]
+                    default_context_cache.character_config.conf_uid = p_info.get("conf_uid") or f"{entry['name']}_001"
+                    default_context_cache.character_config.character_name = p_info.get("character_name") or entry["name"]
+                    default_context_cache.character_config.human_name = p_info.get("human_name") or "User"
+                    default_context_cache.character_config.persona_prompt = p_info.get("persona_prompt") or ""
+                    default_context_cache.character_config.avatar = p_info.get("avatar") or entry.get("avatar") or ""
             return {
                 "status": "ok",
                 "model": entry,
@@ -846,7 +938,7 @@ def init_avatar_model_routes(default_context_cache: "ServiceContext") -> "APIRou
 
     @router.post("/api/models/select", dependencies=[Depends(verify_api_key)])
     async def select_avatar_model(payload: SelectAvatarRequest):
-        """Switch the active VTuber avatar model in the server context and return its model_info."""
+        """Switch the active VTuber avatar model and character persona in the server context."""
         try:
             clean_name = sanitize_model_name(payload.name)
             entries = load_model_dict()
@@ -859,14 +951,36 @@ def init_avatar_model_routes(default_context_cache: "ServiceContext") -> "APIRou
                     status_code=status.HTTP_404_NOT_FOUND,
                     detail=f"Avatar model '{clean_name}' not found",
                 )
+            config_alts_dir = (
+                default_context_cache.system_config.config_alts_dir
+                if default_context_cache and default_context_cache.system_config
+                else "characters"
+            )
+            persona = read_character_persona(clean_name, characters_dir=config_alts_dir)
             if default_context_cache and default_context_cache.character_config:
                 default_context_cache.init_live2d(clean_name)
+                default_context_cache.character_config.conf_name = persona["conf_name"]
+                default_context_cache.character_config.conf_uid = persona["conf_uid"]
+                default_context_cache.character_config.character_name = persona["character_name"]
+                default_context_cache.character_config.human_name = persona["human_name"]
+                default_context_cache.character_config.persona_prompt = persona["persona_prompt"]
+                default_context_cache.character_config.avatar = persona["avatar"] or matched.get("avatar") or ""
+                try:
+                    await default_context_cache.init_agent(
+                        default_context_cache.character_config.agent_config,
+                        persona["persona_prompt"],
+                        force=True,
+                    )
+                except Exception as agent_err:
+                    logger.warning(f"Agent reload on avatar select warning: {agent_err}")
                 if default_context_cache.live2d_model:
                     matched = default_context_cache.live2d_model.model_info
             return {
                 "status": "ok",
                 "active_model": clean_name,
                 "model_info": matched,
+                "persona": persona,
+                "config_files": _scan_presets(config_alts_dir),
             }
         except HTTPException:
             raise
@@ -997,6 +1111,8 @@ def init_avatar_model_routes(default_context_cache: "ServiceContext") -> "APIRou
                     default_context_cache.character_config.character_name = saved["character_name"]
                     default_context_cache.character_config.human_name = saved["human_name"]
                     default_context_cache.character_config.persona_prompt = saved["persona_prompt"]
+                    if saved.get("avatar"):
+                        default_context_cache.character_config.avatar = saved["avatar"]
                     try:
                         await default_context_cache.init_agent(
                             default_context_cache.character_config.agent_config,

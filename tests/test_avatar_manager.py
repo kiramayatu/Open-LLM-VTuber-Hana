@@ -177,6 +177,10 @@ class TestAvatarManagerAndSecurity(unittest.TestCase):
             self.assertEqual(loaded_traversal["character_name"], "SafeChar")
             self.assertEqual(loaded_traversal["human_name"], "SafeUser")
 
+            # Verify non-mao characters do not leak 'mao.png' as their avatar
+            type79_persona = read_character_persona("type79", characters_dir=chars_root)
+            self.assertNotEqual(type79_persona["avatar"], "mao.png")
+
             # Verify Live2dModel loads each format cleanly and extracts emotions
             for model_name in ("hana_3d", "robot", "mao_custom", "shizuku", "chibi_png", "hanamqo"):
                 m = Live2dModel(model_name, model_dict_path=str(dict_path))
@@ -211,8 +215,95 @@ class TestAvatarManagerAndSecurity(unittest.TestCase):
             self.assertIn("AvatarModelUploader", bundle_js)
             self.assertIn("/api/models/upload", bundle_js)
             self.assertIn("Edit Persona", bundle_js)
+            self.assertIn("Edit Character Persona", bundle_js)
             self.assertIn("/api/characters/", bundle_js)
             self.assertIn("reload-character-persona", bundle_js)
+            self.assertIn('maxWidth:"680px"', bundle_js)
+            self.assertNotIn("Character Persona Preset", bundle_js)
+
+        service_ctx_py = (
+            root / "src" / "open_llm_vtuber" / "service_context.py"
+        ).read_text(encoding="utf-8")
+        self.assertIn("[Character & User Identity]", service_ctx_py)
+        self.assertIn("Always call and address the user as", service_ctx_py)
+
+    def test_security_fixes_avatar_and_chat_history(self):
+        from open_llm_vtuber.chat_history_manager import (
+            _ensure_conf_dir,
+            _get_safe_history_path,
+            _sanitize_path_component,
+        )
+
+        # 1. Chat history path component & traversal hardening
+        for unsafe_comp in ("", ".", "..", "../etc", "foo/bar", "foo\\bar", "a..b"):
+            with self.assertRaises(ValueError):
+                _sanitize_path_component(unsafe_comp)
+            with self.assertRaises(ValueError):
+                _ensure_conf_dir(unsafe_comp)
+            with self.assertRaises(ValueError):
+                _get_safe_history_path(unsafe_comp, "valid_hist")
+            with self.assertRaises(ValueError):
+                _get_safe_history_path("valid_conf", unsafe_comp)
+
+        safe_path = _get_safe_history_path("type79_001", "2026-10-31_01-00-00_abcd")
+        self.assertTrue(safe_path.endswith("type79_001/2026-10-31_01-00-00_abcd.json"))
+
+        # 2. Avatar path sanitization in save_character_persona
+        with tempfile.TemporaryDirectory() as td:
+            chars_root = Path(td) / "characters"
+            for unsafe_avatar in (
+                "javascript:alert(1)",
+                "data:text/html,<script>alert(1)</script>",
+                "https://evil.example/avatar.png",
+                "//evil.example/avatar.png",
+                "../../etc/passwd",
+                "/etc/passwd",
+                "subdir/avatar.png",
+                'avatar"onerror="alert(1).png',
+            ):
+                with self.assertRaises(ValueError):
+                    save_character_persona(
+                        "test_char",
+                        character_name="Test",
+                        human_name="User",
+                        persona_prompt="Prompt",
+                        avatar=unsafe_avatar,
+                        characters_dir=chars_root,
+                    )
+
+            for valid_avatar in (
+                "/live2d-models/type79/type79.png",
+                "/avatars/mao.png",
+                "mao.png",
+            ):
+                saved = save_character_persona(
+                    "test_char",
+                    character_name="Test",
+                    human_name="User",
+                    persona_prompt="Prompt",
+                    avatar=valid_avatar,
+                    characters_dir=chars_root,
+                )
+                self.assertEqual(saved["avatar"], valid_avatar)
+
+        # 3. Verify DOM XSS outerHTML sink is removed from frontend bundles
+        root = Path(__file__).parents[1]
+        for bundle_name in ("main-llmprovider-stage4.2.js", "main-llmprovider-stage4.js"):
+            bundle_js = (root / "frontend" / "assets" / bundle_name).read_text(
+                encoding="utf-8"
+            )
+            self.assertNotIn("st.outerHTML=", bundle_js)
+            self.assertIn("st.replaceWith(dv)", bundle_js)
+
+        # 4. Verify WebSocket disconnect resource cleanup awaits popped context
+        ws_py = (
+            root / "src" / "open_llm_vtuber" / "websocket_handler.py"
+        ).read_text(encoding="utf-8")
+        disconnect_block = ws_py.split("async def handle_disconnect(")[1].split(
+            "async def _cleanup_failed_connection("
+        )[0]
+        self.assertIn("context = self.client_contexts.pop(client_uid, None)", disconnect_block)
+        self.assertNotIn("self.client_contexts.get(client_uid)", disconnect_block)
 
 
 if __name__ == "__main__":

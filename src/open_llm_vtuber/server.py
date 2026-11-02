@@ -35,6 +35,7 @@ class CORSStaticFiles(StarletteStaticFiles):
         response.headers["Access-Control-Allow-Origin"] = "*"
         response.headers["Access-Control-Allow-Methods"] = "GET, OPTIONS"
         response.headers["Access-Control-Allow-Headers"] = "*"
+        response.headers["X-Content-Type-Options"] = "nosniff"
 
         if path.endswith(".js"):
             response.headers["Content-Type"] = "application/javascript"

@@ -484,15 +484,41 @@ class ServiceContext:
 
     async def construct_system_prompt(self, persona_prompt: str) -> str:
         """
-        Append tool prompts to persona prompt.
+        Append character/user identity and tool prompts to persona prompt.
 
         Parameters:
         - persona_prompt (str): The persona prompt.
 
         Returns:
-        - str: The system prompt with all tool prompts appended.
+        - str: The system prompt with identity context and all tool prompts appended.
         """
         logger.debug(f"constructing persona_prompt: '''{persona_prompt}'''")
+
+        char_name = (
+            (self.character_config.character_name or "").strip()
+            if self.character_config
+            else ""
+        )
+        human_name = (
+            (self.character_config.human_name or "").strip()
+            if self.character_config
+            else ""
+        )
+        identity_lines = []
+        if char_name:
+            identity_lines.append(f"- Your display name / character identity is: {char_name}")
+        if human_name:
+            identity_lines.append(
+                f"- The user's name (how you MUST address and call the user) is: \"{human_name}\". "
+                f"Always call and address the user as \"{human_name}\" naturally in conversation, and never ask what their name is."
+            )
+        if identity_lines:
+            persona_prompt = (
+                f"{persona_prompt.rstrip()}\n\n"
+                f"[Character & User Identity]\n"
+                + "\n".join(identity_lines)
+                + "\n"
+            )
 
         for prompt_name, prompt_file in self.system_config.tool_prompts.items():
             if (
@@ -554,7 +580,7 @@ class ServiceContext:
                 if not file_path.is_file() or file_path.suffix.lower() != ".yaml":
                     raise ValueError("Invalid configuration file")
 
-                alt_config_data = read_yaml(str(file_path)).get("character_config")
+                alt_config_data = read_yaml(str(file_path)).get("character_config") or {}
 
                 # Start with base conf.yaml character_config so switching from a
                 # previous character preset does not leak its live2d_model_name
@@ -565,6 +591,20 @@ class ServiceContext:
                 new_character_config_data = deep_merge(
                     base_char_data, alt_config_data
                 )
+                # Prevent base conf.yaml's 'mao.png' from leaking onto non-mao characters
+                target_model = str(new_character_config_data.get("live2d_model_name") or "")
+                if (
+                    not alt_config_data.get("avatar")
+                    or (
+                        alt_config_data.get("avatar") == "mao.png"
+                        and not target_model.startswith("mao")
+                    )
+                ):
+                    from .avatar_manager import _find_preview_image
+
+                    candidate_dir = Path("live2d-models") / target_model
+                    found_preview = _find_preview_image(candidate_dir, target_model)
+                    new_character_config_data["avatar"] = found_preview or ""
 
             if new_character_config_data:
                 new_config = {

@@ -603,7 +603,7 @@ def init_webtool_routes(default_context_cache: ServiceContext) -> APIRouter:
         MAX_FILE_SIZE = 10 * 1024 * 1024  # 10MB
         
         try:
-            contents = await file.read()
+            contents = await file.read(MAX_FILE_SIZE + 1)
             
             if len(contents) > MAX_FILE_SIZE:
                 logger.error(f"File too large: {len(contents)} bytes")

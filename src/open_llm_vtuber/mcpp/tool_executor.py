@@ -387,9 +387,6 @@ class ToolExecutor:
                         if routed_tool in {"artifact_create_document", "artifact_create_pdf"}:
                             paragraphs = content.splitlines() or [content]
                             if routed_tool == "artifact_create_document":
-                                artifact = await self._artifact_generation.run(
-                                    self._artifact_service.create_document, filename, title, paragraphs
-                                ) if False else None
                                 data = await self._artifact_generation.run(
                                     generate_docx, title=title, paragraphs=paragraphs
                                 )

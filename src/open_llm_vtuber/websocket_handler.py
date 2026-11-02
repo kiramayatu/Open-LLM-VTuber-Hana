@@ -360,7 +360,7 @@ class WebSocketHandler:
 
         # Clean up other client data
         self.client_connections.pop(client_uid, None)
-        self.client_contexts.pop(client_uid, None)
+        context = self.client_contexts.pop(client_uid, None)
         self.received_data_buffers.pop(client_uid, None)
         if client_uid in self.current_conversation_tasks:
             task = self.current_conversation_tasks[client_uid]
@@ -369,7 +369,6 @@ class WebSocketHandler:
             self.current_conversation_tasks.pop(client_uid, None)
 
         # Call context close to clean up resources (e.g., MCPClient)
-        context = self.client_contexts.get(client_uid)
         if context:
             await context.close()
 
@@ -379,7 +378,7 @@ class WebSocketHandler:
     async def _cleanup_failed_connection(self, client_uid: str) -> None:
         """Clean up failed connection data"""
         self.client_connections.pop(client_uid, None)
-        self.client_contexts.pop(client_uid, None)
+        context = self.client_contexts.pop(client_uid, None)
         self.received_data_buffers.pop(client_uid, None)
         self.chat_group_manager.client_group_map.pop(client_uid, None)
 
@@ -388,6 +387,9 @@ class WebSocketHandler:
             if task and not task.done():
                 task.cancel()
             self.current_conversation_tasks.pop(client_uid, None)
+
+        if context:
+            await context.close()
 
         message_handler.cleanup_client(client_uid)
 
@@ -635,15 +637,44 @@ class WebSocketHandler:
     async def _handle_avatar_model_switch(
         self, websocket: WebSocket, client_uid: str, data: dict
     ):
-        """Handle switching the active avatar model for the session and default context."""
+        """Handle switching the active avatar model AND its character persona for the session and default context."""
+        from .avatar_manager import read_character_persona
+
         model_name = (data.get("model_name") or data.get("name") or "").strip()
         if not model_name:
             return
         context = self.client_contexts.get(client_uid) or self.default_context_cache
         try:
+            config_alts_dir = (
+                context.system_config.config_alts_dir
+                if context and context.system_config
+                else "characters"
+            )
+            persona = read_character_persona(model_name, characters_dir=config_alts_dir)
             context.init_live2d(model_name)
+            if context.character_config:
+                context.character_config.conf_name = persona["conf_name"]
+                context.character_config.conf_uid = persona["conf_uid"]
+                context.character_config.character_name = persona["character_name"]
+                context.character_config.human_name = persona["human_name"]
+                context.character_config.persona_prompt = persona["persona_prompt"]
+                context.character_config.avatar = persona["avatar"]
+                await context.init_agent(
+                    context.character_config.agent_config,
+                    persona["persona_prompt"],
+                    force=True,
+                )
+
             if self.default_context_cache and self.default_context_cache is not context:
                 self.default_context_cache.init_live2d(model_name)
+                if self.default_context_cache.character_config:
+                    self.default_context_cache.character_config.conf_name = persona["conf_name"]
+                    self.default_context_cache.character_config.conf_uid = persona["conf_uid"]
+                    self.default_context_cache.character_config.character_name = persona["character_name"]
+                    self.default_context_cache.character_config.human_name = persona["human_name"]
+                    self.default_context_cache.character_config.persona_prompt = persona["persona_prompt"]
+                    self.default_context_cache.character_config.avatar = persona["avatar"]
+
             await websocket.send_text(
                 json.dumps(
                     {
@@ -652,6 +683,14 @@ class WebSocketHandler:
                         "conf_name": context.character_config.conf_name,
                         "conf_uid": context.character_config.conf_uid,
                         "client_uid": client_uid,
+                    }
+                )
+            )
+            await websocket.send_text(
+                json.dumps(
+                    {
+                        "type": "config-switched",
+                        "message": f"Switched to character: {persona['character_name']}",
                     }
                 )
             )
@@ -698,6 +737,8 @@ class WebSocketHandler:
                 context.character_config.character_name = persona["character_name"]
                 context.character_config.human_name = persona["human_name"]
                 context.character_config.persona_prompt = persona["persona_prompt"]
+                if persona.get("avatar"):
+                    context.character_config.avatar = persona["avatar"]
                 await context.init_agent(
                     context.character_config.agent_config,
                     persona["persona_prompt"],
