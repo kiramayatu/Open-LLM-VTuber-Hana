@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import yaml
+from loguru import logger
 
 if TYPE_CHECKING:
     from fastapi import APIRouter
@@ -537,6 +538,73 @@ def _sanitize_avatar_path(avatar: str | None) -> str:
     return cleaned
 
 
+def persist_active_character_to_conf(
+    character_config: Any,
+    conf_path: str | Path = "conf.yaml",
+) -> None:
+    """
+    Persist the active character and avatar settings into conf.yaml
+    so that user selections survive server restarts while preserving YAML comments.
+    """
+    path = Path(conf_path)
+    if not path.is_file():
+        return
+    try:
+        from ruamel.yaml import YAML
+
+        ryaml = YAML()
+        ryaml.preserve_quotes = True
+        with open(path, "r", encoding="utf-8") as f:
+            doc = ryaml.load(f)
+
+        if not isinstance(doc, dict):
+            return
+
+        char_dict = doc.get("character_config")
+        if not isinstance(char_dict, dict):
+            char_dict = {}
+            doc["character_config"] = char_dict
+
+        def _get_val(attr: str) -> str | None:
+            if hasattr(character_config, attr):
+                val = getattr(character_config, attr)
+                return str(val) if val is not None else None
+            elif isinstance(character_config, dict):
+                val = character_config.get(attr)
+                return str(val) if val is not None else None
+            return None
+
+        model_name = _get_val("live2d_model_name")
+        if model_name:
+            char_dict["live2d_model_name"] = model_name
+        conf_name = _get_val("conf_name")
+        if conf_name:
+            char_dict["conf_name"] = conf_name
+        conf_uid = _get_val("conf_uid")
+        if conf_uid:
+            char_dict["conf_uid"] = conf_uid
+        char_name = _get_val("character_name")
+        if char_name:
+            char_dict["character_name"] = char_name
+        human_name = _get_val("human_name")
+        if human_name:
+            char_dict["human_name"] = human_name
+        persona_prompt = _get_val("persona_prompt")
+        if persona_prompt:
+            char_dict["persona_prompt"] = persona_prompt
+        avatar = _get_val("avatar")
+        if avatar is not None:
+            char_dict["avatar"] = avatar
+
+        tmp_path = path.with_suffix(".tmp")
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            ryaml.dump(doc, f)
+        tmp_path.replace(path)
+        logger.info(f"Persisted active character ({model_name}) to {path}")
+    except Exception as e:
+        logger.warning(f"Failed to persist active character to {conf_path}: {e}")
+
+
 def save_character_persona(
     model_or_conf_name: str,
     *,
@@ -912,6 +980,7 @@ def init_avatar_model_routes(default_context_cache: "ServiceContext") -> "APIRou
                     default_context_cache.character_config.human_name = p_info.get("human_name") or "User"
                     default_context_cache.character_config.persona_prompt = p_info.get("persona_prompt") or ""
                     default_context_cache.character_config.avatar = p_info.get("avatar") or entry.get("avatar") or ""
+                persist_active_character_to_conf(default_context_cache.character_config)
             return {
                 "status": "ok",
                 "model": entry,
@@ -965,6 +1034,7 @@ def init_avatar_model_routes(default_context_cache: "ServiceContext") -> "APIRou
                 default_context_cache.character_config.human_name = persona["human_name"]
                 default_context_cache.character_config.persona_prompt = persona["persona_prompt"]
                 default_context_cache.character_config.avatar = persona["avatar"] or matched.get("avatar") or ""
+                persist_active_character_to_conf(default_context_cache.character_config)
                 try:
                     await default_context_cache.init_agent(
                         default_context_cache.character_config.agent_config,
@@ -1045,12 +1115,44 @@ def init_avatar_model_routes(default_context_cache: "ServiceContext") -> "APIRou
             else None
         )
         fallback_info = None
+
         if active_name == clean_name and remaining:
             fallback_name = remaining[0]["name"]
             default_context_cache.init_live2d(fallback_name)
             active_name = fallback_name
+            try:
+                fallback_persona = read_character_persona(
+                    fallback_name, characters_dir=config_alts_dir
+                )
+                default_context_cache.character_config.conf_name = fallback_persona["conf_name"]
+                default_context_cache.character_config.conf_uid = fallback_persona["conf_uid"]
+                default_context_cache.character_config.character_name = fallback_persona["character_name"]
+                default_context_cache.character_config.human_name = fallback_persona["human_name"]
+                default_context_cache.character_config.persona_prompt = fallback_persona["persona_prompt"]
+                default_context_cache.character_config.avatar = fallback_persona["avatar"]
+            except Exception:
+                pass
             if default_context_cache.live2d_model:
                 fallback_info = default_context_cache.live2d_model.model_info
+            persist_active_character_to_conf(default_context_cache.character_config)
+        else:
+            # If the deleted model was saved in conf.yaml, ensure conf.yaml is updated
+            # so the server never revives a deleted model on reboot
+            try:
+                from ruamel.yaml import YAML
+
+                ryaml = YAML()
+                with open("conf.yaml", "r", encoding="utf-8") as f:
+                    doc = ryaml.load(f)
+                if (
+                    isinstance(doc, dict)
+                    and doc.get("character_config", {}).get("live2d_model_name") == clean_name
+                    and default_context_cache
+                    and default_context_cache.character_config
+                ):
+                    persist_active_character_to_conf(default_context_cache.character_config)
+            except Exception:
+                pass
 
         return {
             "status": "ok",
@@ -1113,6 +1215,7 @@ def init_avatar_model_routes(default_context_cache: "ServiceContext") -> "APIRou
                     default_context_cache.character_config.persona_prompt = saved["persona_prompt"]
                     if saved.get("avatar"):
                         default_context_cache.character_config.avatar = saved["avatar"]
+                    persist_active_character_to_conf(default_context_cache.character_config)
                     try:
                         await default_context_cache.init_agent(
                             default_context_cache.character_config.agent_config,

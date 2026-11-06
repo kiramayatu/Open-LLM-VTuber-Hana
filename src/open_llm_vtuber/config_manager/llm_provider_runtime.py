@@ -97,6 +97,10 @@ def provider_to_legacy_config(provider: LLMProvider) -> tuple[str, dict[str, Any
     }
 
     if runtime_provider == "ollama_llm":
+        # The runtime talks to Ollama through its OpenAI-compatible API, which
+        # lives under /v1. Managed providers store the bare server root
+        # (e.g. http://127.0.0.1:11434) used for /api/tags discovery.
+        config["base_url"] = _ensure_v1_suffix(provider.base_url)
         config["llm_api_key"] = provider.secret_value() or "default_api_key"
         config["keep_alive"] = _number_setting(settings, "keep_alive", -1)
         config["unload_at_exit"] = bool(settings.get("unload_at_exit", True))
@@ -236,6 +240,11 @@ def import_legacy_provider(
     if activate:
         store.set_active(provider.provider_id)
     return provider
+
+
+def _ensure_v1_suffix(base_url: str | None) -> str:
+    url = (base_url or "http://localhost:11434").strip().rstrip("/")
+    return url if url.endswith("/v1") else f"{url}/v1"
 
 
 def _number_setting(settings: dict[str, Any], key: str, default: float | int) -> float | int:

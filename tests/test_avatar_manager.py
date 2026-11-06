@@ -305,6 +305,39 @@ class TestAvatarManagerAndSecurity(unittest.TestCase):
         self.assertIn("context = self.client_contexts.pop(client_uid, None)", disconnect_block)
         self.assertNotIn("self.client_contexts.get(client_uid)", disconnect_block)
 
+    def test_persist_active_character_to_conf(self):
+        import shutil
+        from ruamel.yaml import YAML
+        from open_llm_vtuber.avatar_manager import persist_active_character_to_conf
+
+        with tempfile.TemporaryDirectory() as td:
+            tmp_conf = Path(td) / "conf.yaml"
+            shutil.copy2("conf.yaml", tmp_conf)
+
+            # Persist a new active character
+            mock_cfg = {
+                "live2d_model_name": "type79",
+                "character_name": "Type 79",
+                "human_name": "Kira",
+                "persona_prompt": "You are Type 79.",
+                "avatar": "/live2d-models/type79/type79.png",
+                "conf_name": "type79",
+                "conf_uid": "type79_01",
+            }
+            persist_active_character_to_conf(mock_cfg, conf_path=tmp_conf)
+
+            # Verify saved cleanly with ruamel.yaml
+            ryaml = YAML()
+            with open(tmp_conf, "r", encoding="utf-8") as f:
+                saved = ryaml.load(f)
+
+            char_sec = saved.get("character_config", {})
+            self.assertEqual(char_sec.get("live2d_model_name"), "type79")
+            self.assertEqual(char_sec.get("character_name"), "Type 79")
+            self.assertEqual(char_sec.get("human_name"), "Kira")
+            self.assertEqual(char_sec.get("persona_prompt"), "You are Type 79.")
+            self.assertEqual(char_sec.get("avatar"), "/live2d-models/type79/type79.png")
+
 
 if __name__ == "__main__":
     unittest.main()

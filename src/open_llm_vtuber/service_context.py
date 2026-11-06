@@ -323,7 +323,25 @@ class ServiceContext:
             self.character_config.live2d_model_name = live2d_model_name
         except Exception as e:
             logger.critical(f"Error initializing Live2D: {e}")
-            logger.critical("Try to proceed without Live2D...")
+            from .avatar_manager import load_model_dict, persist_active_character_to_conf
+
+            entries = load_model_dict()
+            valid_entries = [m for m in entries if isinstance(m, dict) and m.get("name")]
+            if valid_entries:
+                fallback_name = valid_entries[0]["name"]
+                logger.warning(
+                    f"Avatar '{live2d_model_name}' unavailable. Falling back to '{fallback_name}'"
+                )
+                try:
+                    self.live2d_model = Live2dModel(fallback_name)
+                    self.character_config.live2d_model_name = fallback_name
+                    persist_active_character_to_conf(self.character_config)
+                except Exception as fallback_err:
+                    logger.critical(
+                        f"Fallback Live2D initialization also failed: {fallback_err}"
+                    )
+            else:
+                logger.critical("Try to proceed without Live2D...")
 
     def init_asr(self, asr_config: ASRConfig) -> None:
         if not self.asr_engine or (self.character_config.asr_config != asr_config):

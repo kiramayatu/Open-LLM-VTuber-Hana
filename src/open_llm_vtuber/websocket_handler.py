@@ -633,6 +633,9 @@ class WebSocketHandler:
                     self.default_context_cache.character_config.live2d_model_name = (
                         context.character_config.live2d_model_name
                     )
+                    from .avatar_manager import persist_active_character_to_conf
+
+                    persist_active_character_to_conf(self.default_context_cache.character_config)
 
     async def _handle_avatar_model_switch(
         self, websocket: WebSocket, client_uid: str, data: dict
@@ -674,6 +677,12 @@ class WebSocketHandler:
                     self.default_context_cache.character_config.human_name = persona["human_name"]
                     self.default_context_cache.character_config.persona_prompt = persona["persona_prompt"]
                     self.default_context_cache.character_config.avatar = persona["avatar"]
+
+            from .avatar_manager import persist_active_character_to_conf
+
+            target_ctx = self.default_context_cache or context
+            if target_ctx and target_ctx.character_config:
+                persist_active_character_to_conf(target_ctx.character_config)
 
             await websocket.send_text(
                 json.dumps(
